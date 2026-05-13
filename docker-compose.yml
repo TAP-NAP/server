@@ -1,0 +1,38 @@
+services:
+  app:
+    build:
+      context: .
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      SERVER_ADDR: 0.0.0.0:8080
+      REDIS_URL: ${DOCKER_REDIS_URL:-redis://redis:6379}
+      TEAM_ID: ${TEAM_ID:-YOUR_APPLE_TEAM_ID}
+      BUNDLE_ID: ${BUNDLE_ID:-com.example.tapcam}
+      APP_ATTEST_ENV: ${APP_ATTEST_ENV:-production}
+      APPLE_APP_ATTEST_ROOT_CA_PATH: /app/certs/apple_app_attestation_root_ca.pem
+      CHALLENGE_TTL_SECONDS: ${CHALLENGE_TTL_SECONDS:-3600}
+      RUST_LOG: ${RUST_LOG:-tap_app_attest_server=info,tower_http=info}
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  redis:
+    image: redis:7-bookworm
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-data:

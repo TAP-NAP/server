@@ -1,0 +1,26 @@
+[package]
+name = "tap-app-attest-server"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+apple_app_attest_attestation = { git = "https://github.com/TAP-NAP/attestation_assertion_verifier", package = "apple_app_attest_attestation" }
+axum = "0.7"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4"
+rand = "0.8"
+redis = { version = "0.25", features = ["aio", "tokio-comp", "connection-manager"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tower-http = { version = "0.5", features = ["trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"
