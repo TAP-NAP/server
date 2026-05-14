@@ -16,6 +16,7 @@ pub struct Config {
     pub app_attest_environment: AppAttestEnvironment,
     pub apple_root_ca: Vec<u8>,
     pub challenge_ttl: Duration,
+    pub request_logs: bool,
 }
 
 #[derive(Debug, Error)]
@@ -54,6 +55,10 @@ impl Config {
             env::var("CHALLENGE_TTL_SECONDS")
                 .unwrap_or_else(|_| DEFAULT_CHALLENGE_TTL_SECONDS.to_string()),
         )?;
+        let request_logs = parse_bool(
+            "REQUEST_LOGS",
+            env::var("REQUEST_LOGS").unwrap_or_else(|_| "false".to_string()),
+        )?;
 
         Ok(Self {
             server_addr,
@@ -63,6 +68,7 @@ impl Config {
             app_attest_environment,
             apple_root_ca,
             challenge_ttl,
+            request_logs,
         })
     }
 
@@ -76,6 +82,7 @@ impl Config {
             app_attest_environment: AppAttestEnvironment::Production,
             apple_root_ca: fs::read(root_ca_path).unwrap_or_default(),
             challenge_ttl: Duration::from_secs(DEFAULT_CHALLENGE_TTL_SECONDS),
+            request_logs: false,
         }
     }
 }
@@ -121,6 +128,17 @@ fn parse_duration_seconds(name: &'static str, value: String) -> Result<Duration,
     Ok(Duration::from_secs(seconds))
 }
 
+fn parse_bool(name: &'static str, value: String) -> Result<bool, ConfigError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        other => Err(ConfigError::Invalid {
+            name,
+            message: format!("expected true or false, got {other:?}"),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +161,14 @@ mod tests {
             parse_environment("development".to_string()).unwrap(),
             AppAttestEnvironment::Development
         );
+    }
+
+    #[test]
+    fn parses_bool_flags() {
+        assert!(parse_bool("REQUEST_LOGS", "true".to_string()).unwrap());
+        assert!(parse_bool("REQUEST_LOGS", "on".to_string()).unwrap());
+        assert!(!parse_bool("REQUEST_LOGS", "false".to_string()).unwrap());
+        assert!(!parse_bool("REQUEST_LOGS", "0".to_string()).unwrap());
+        assert!(parse_bool("REQUEST_LOGS", "maybe".to_string()).is_err());
     }
 }

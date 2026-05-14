@@ -53,7 +53,7 @@ TAP App Attest deployment helper
 Usage:
   ./scripts/server.sh help
   ./scripts/server.sh init
-  ./scripts/server.sh start [--restore-from <backup.rdb>]
+  ./scripts/server.sh start [--restore-from <backup.rdb>] [--request-logs] [--log-level <level>]
   ./scripts/server.sh stop [--no-backup]
   ./scripts/server.sh backup
   ./scripts/server.sh self-test
@@ -69,6 +69,14 @@ State semantics:
   start
     Starts Redis and app using the current Redis data directory. This is not an
     empty start after stop; existing challenge and credential records are loaded.
+
+  start --request-logs
+    Enables safe request-level business logs for this app container. Normal
+    start keeps those logs disabled unless REQUEST_LOGS=true is set in .env.
+
+  start --log-level <level>
+    Overrides RUST_LOG for this app container. Supported levels:
+      error, warn, info, debug, trace
 
   start --restore-from <backup.rdb>
     Requires app and Redis to be stopped. Replaces the Redis data directory with
@@ -88,6 +96,7 @@ Examples:
   docker build -t ${APP_IMAGE} .
   ./scripts/server.sh init
   ./scripts/server.sh start
+  ./scripts/server.sh start --request-logs --log-level info
   ./scripts/server.sh self-test
   ./scripts/server.sh backup
   ./scripts/server.sh stop
@@ -110,6 +119,16 @@ require_no_args() {
     usage
     die "Unexpected arguments: $*"
   fi
+}
+
+validate_log_level() {
+  case "$1" in
+    error|warn|info|debug|trace)
+      ;;
+    *)
+      die "Unsupported log level: $1. Expected one of: error, warn, info, debug, trace"
+      ;;
+  esac
 }
 
 ensure_docker() {
@@ -385,10 +404,27 @@ wait_for_app() {
 }
 
 start_app() {
+  local request_logs="${1:-false}"
+  local log_level="${2:-}"
+  local docker_env_args=()
+
   if container_exists "$APP_CONTAINER_NAME"; then
     log_info "Removing existing app container so config/image changes are applied"
     docker rm -f "$APP_CONTAINER_NAME" >/dev/null
   fi
+
+  if [ "$request_logs" = "true" ]; then
+    log_info "Request business logs enabled for this app container"
+    docker_env_args+=(-e REQUEST_LOGS=true)
+  fi
+
+  if [ -n "$log_level" ]; then
+    validate_log_level "$log_level"
+    log_info "Overriding app log level: $log_level"
+    docker_env_args+=(-e "RUST_LOG=tap_app_attest_server=${log_level},tower_http=${log_level}")
+  fi
+
+  docker_env_args+=(-e LOG_COLOR=always)
 
   log_info "Creating app container: $APP_CONTAINER_NAME"
   docker run -d \
@@ -397,6 +433,7 @@ start_app() {
     --network "$DOCKER_NETWORK_NAME" \
     --env-file .env \
     -e APPLE_APP_ATTEST_ROOT_CA_PATH="$CONTAINER_ROOT_CA_PATH" \
+    "${docker_env_args[@]}" \
     -p "${APP_HOST_BIND}:${APP_PORT}:${APP_CONTAINER_PORT}" \
     "$APP_IMAGE" >/dev/null
 
@@ -405,12 +442,24 @@ start_app() {
 
 cmd_start() {
   local restore_from=""
+  local request_logs="false"
+  local log_level=""
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --restore-from)
         [ "$#" -ge 2 ] || die "--restore-from requires a backup file path"
         restore_from="$2"
+        shift 2
+        ;;
+      --request-logs)
+        request_logs="true"
+        shift
+        ;;
+      --log-level)
+        [ "$#" -ge 2 ] || die "--log-level requires one of: error, warn, info, debug, trace"
+        log_level="$2"
+        validate_log_level "$log_level"
         shift 2
         ;;
       -h|--help)
@@ -436,7 +485,7 @@ cmd_start() {
   fi
 
   start_redis
-  start_app
+  start_app "$request_logs" "$log_level"
 
   log_ok "Started app container: $APP_CONTAINER_NAME"
   log_ok "Started Redis container: $REDIS_CONTAINER_NAME"

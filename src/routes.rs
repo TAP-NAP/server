@@ -50,6 +50,17 @@ async fn create_challenge(
         .put_challenge(&issued.record, state.config.challenge_ttl)
         .await?;
 
+    if state.config.request_logs {
+        tracing::info!(
+            endpoint = "/app-attest/challenges",
+            purpose = ?issued.record.purpose,
+            credential_name = %issued.record.credential_name,
+            challenge_id = %issued.record.challenge_id,
+            expires_at = %issued.record.expires_at,
+            "issued app attest challenge"
+        );
+    }
+
     Ok(Json(ChallengeResponse {
         challenge_id: issued.record.challenge_id,
         challenge: issued.record.raw_challenge_base64_url,
@@ -67,6 +78,17 @@ async fn register_attestation(
     request.attestation_object =
         require_non_empty("attestationObject", request.attestation_object)?;
 
+    if state.config.request_logs {
+        tracing::info!(
+            endpoint = "/app-attest/attestations",
+            credential_name = %request.credential_name,
+            key_id = %request.key_id,
+            challenge_id = %request.challenge_id,
+            attestation_object_len = request.attestation_object.len(),
+            "received app attest attestation"
+        );
+    }
+
     let consumed = match state
         .store
         .consume_challenge(&request.challenge_id, &request.key_id, utc_now_seconds())
@@ -81,6 +103,16 @@ async fn register_attestation(
 
     let validation = validate_attestation_challenge(&consumed, &request);
     if let Err(error) = validation {
+        if state.config.request_logs {
+            tracing::warn!(
+                endpoint = "/app-attest/attestations",
+                credential_name = %request.credential_name,
+                key_id = %request.key_id,
+                challenge_id = %request.challenge_id,
+                error = %error,
+                "attestation challenge validation failed"
+            );
+        }
         state
             .store
             .mark_challenge_failed(&request.challenge_id, &request.key_id)
@@ -91,6 +123,14 @@ async fn register_attestation(
     let raw_challenge = match decode_base64_url(&consumed.raw_challenge_base64_url) {
         Ok(raw) => raw,
         Err(err) => {
+            if state.config.request_logs {
+                tracing::error!(
+                    endpoint = "/app-attest/attestations",
+                    challenge_id = %request.challenge_id,
+                    error = %err,
+                    "stored challenge payload is invalid"
+                );
+            }
             state
                 .store
                 .mark_challenge_failed(&request.challenge_id, &request.key_id)
@@ -104,6 +144,16 @@ async fn register_attestation(
     let credential = match state.verifier.verify_registration(&request, &raw_challenge) {
         Ok(credential) => credential,
         Err(error) => {
+            if state.config.request_logs {
+                tracing::warn!(
+                    endpoint = "/app-attest/attestations",
+                    credential_name = %request.credential_name,
+                    key_id = %request.key_id,
+                    challenge_id = %request.challenge_id,
+                    error = %error,
+                    "attestation verification failed"
+                );
+            }
             state
                 .store
                 .mark_challenge_failed(&request.challenge_id, &request.key_id)
@@ -114,6 +164,16 @@ async fn register_attestation(
 
     let credential_id = credential.key_id.clone();
     state.store.save_credential(&credential).await?;
+
+    if state.config.request_logs {
+        tracing::info!(
+            endpoint = "/app-attest/attestations",
+            credential_name = %request.credential_name,
+            key_id = %credential_id,
+            challenge_id = %request.challenge_id,
+            "accepted app attest credential"
+        );
+    }
 
     Ok(Json(AttestationResponse {
         credential_id: Some(credential_id),
@@ -134,7 +194,28 @@ async fn verify_capture_signature(
     let signing_binding_json = canonical_signing_binding_json(&request.signing_binding)?;
     let signing_binding_sha256 = sha256_base64_url(&signing_binding_json);
 
+    if state.config.request_logs {
+        tracing::info!(
+            endpoint = "/tapcam/capture-signatures/verify",
+            key_id = %canonical_key_id,
+            capture_id = %request.signing_binding.capture_id,
+            body_sha256 = %request.signing_binding.body_sha256,
+            signing_binding_sha256 = %signing_binding_sha256,
+            assertion_object_len = request.assertion_object.len(),
+            "received tapcam capture signature verification"
+        );
+    }
+
     let Some(credential) = state.store.get_credential(&canonical_key_id).await? else {
+        if state.config.request_logs {
+            tracing::info!(
+                endpoint = "/tapcam/capture-signatures/verify",
+                key_id = %canonical_key_id,
+                signing_binding_sha256 = %signing_binding_sha256,
+                reason = "keyNotRegistered",
+                "capture signature verification result invalid"
+            );
+        }
         return Ok(Json(capture_signature_invalid(
             canonical_key_id,
             signing_binding_sha256,
@@ -143,6 +224,16 @@ async fn verify_capture_signature(
     };
 
     if credential.status != CredentialStatus::Active {
+        if state.config.request_logs {
+            tracing::info!(
+                endpoint = "/tapcam/capture-signatures/verify",
+                key_id = %canonical_key_id,
+                signing_binding_sha256 = %signing_binding_sha256,
+                credential_status = ?credential.status,
+                reason = "credentialNotActive",
+                "capture signature verification result invalid"
+            );
+        }
         return Ok(Json(capture_signature_invalid(
             canonical_key_id,
             signing_binding_sha256,
@@ -151,6 +242,15 @@ async fn verify_capture_signature(
     }
 
     if let Some(reason) = validate_capture_signing_binding(&request.signing_binding) {
+        if state.config.request_logs {
+            tracing::info!(
+                endpoint = "/tapcam/capture-signatures/verify",
+                key_id = %canonical_key_id,
+                signing_binding_sha256 = %signing_binding_sha256,
+                reason = ?reason,
+                "capture signature verification result invalid"
+            );
+        }
         return Ok(Json(capture_signature_invalid(
             canonical_key_id,
             signing_binding_sha256,
@@ -165,11 +265,29 @@ async fn verify_capture_signature(
     )?;
 
     if !valid {
+        if state.config.request_logs {
+            tracing::info!(
+                endpoint = "/tapcam/capture-signatures/verify",
+                key_id = %canonical_key_id,
+                signing_binding_sha256 = %signing_binding_sha256,
+                reason = "signatureInvalid",
+                "capture signature verification result invalid"
+            );
+        }
         return Ok(Json(capture_signature_invalid(
             canonical_key_id,
             signing_binding_sha256,
             CaptureSignatureInvalidReason::SignatureInvalid,
         )));
+    }
+
+    if state.config.request_logs {
+        tracing::info!(
+            endpoint = "/tapcam/capture-signatures/verify",
+            key_id = %canonical_key_id,
+            signing_binding_sha256 = %signing_binding_sha256,
+            "capture signature verification result valid"
+        );
     }
 
     Ok(Json(CaptureSignatureVerifyResponse {
@@ -201,6 +319,16 @@ async fn credential_status(
         },
         _ => ServerCredentialStatus::Unknown,
     };
+
+    if state.config.request_logs {
+        tracing::info!(
+            endpoint = "/app-attest/credentials/status",
+            credential_name = %credential_name,
+            key_id = %canonical_key_id,
+            status = ?status,
+            "credential status requested"
+        );
+    }
 
     Ok(Json(status))
 }

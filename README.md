@@ -32,7 +32,9 @@ BUNDLE_ID=com.example.tapcam
 APP_ATTEST_ENV=production
 APPLE_APP_ATTEST_ROOT_CA_PATH=/app/certs/apple_app_attestation_root_ca.pem
 CHALLENGE_TTL_SECONDS=3600
-RUST_LOG=tap_app_attest_server=info,tower_http=info
+REQUEST_LOGS=false
+RUST_LOG=tap_app_attest_server=info,tower_http=warn
+LOG_COLOR=always
 ```
 
 `SERVER_ADDR` and `REDIS_URL` should keep these Docker values for
@@ -91,6 +93,30 @@ Follow logs:
 ./scripts/server.sh logs
 ./scripts/server.sh logs --redis
 ```
+
+The app logs one safe line for each client-facing operation: challenge issue,
+attestation receipt/result, credential status lookup, and TAPCam capture
+signature verification. Large or sensitive payloads such as `attestationObject`,
+`assertionObject`, and raw challenges are not printed; logs include IDs, object
+lengths, hashes, and result reasons instead.
+
+Those request-level business logs are disabled by default. Start the app in
+request-log mode when you want to watch client traffic:
+
+```sh
+./scripts/server.sh start --request-logs --log-level info
+./scripts/server.sh logs
+```
+
+For quieter or noisier output, use:
+
+```sh
+./scripts/server.sh start --log-level warn
+./scripts/server.sh start --request-logs --log-level debug
+```
+
+Supported levels are `error`, `warn`, `info`, `debug`, and `trace`. App logs use
+a colored multi-line pretty format when `LOG_COLOR=always`.
 
 Stop the service:
 

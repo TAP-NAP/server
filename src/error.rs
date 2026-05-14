@@ -145,6 +145,21 @@ impl AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, body) = self.status_and_body();
+        if status.is_server_error() {
+            tracing::error!(
+                status = status.as_u16(),
+                code = body.code,
+                message = %body.message,
+                "request failed"
+            );
+        } else {
+            tracing::warn!(
+                status = status.as_u16(),
+                code = body.code,
+                message = %body.message,
+                "request rejected"
+            );
+        }
         (status, Json(ErrorEnvelope { error: body })).into_response()
     }
 }

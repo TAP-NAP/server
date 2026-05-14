@@ -10,7 +10,7 @@ use crate::config::Config;
 use crate::routes::router;
 use crate::store::redis::RedisStore;
 use crate::verifier::AttestationVerifier;
-use std::sync::Arc;
+use std::{env, io::IsTerminal, sync::Arc};
 use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -27,9 +27,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "tap_app_attest_server=info,tower_http=info".into()),
+                .unwrap_or_else(|_| "tap_app_attest_server=info,tower_http=warn".into()),
         )
-        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .pretty()
+                .with_ansi(log_color_enabled()),
+        )
         .init();
 
     let config = Arc::new(Config::from_env()?);
@@ -51,6 +55,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     Ok(())
+}
+
+fn log_color_enabled() -> bool {
+    match env::var("LOG_COLOR")
+        .unwrap_or_else(|_| "auto".to_string())
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "always" | "true" | "1" | "yes" | "on" => true,
+        "never" | "false" | "0" | "no" | "off" => false,
+        _ => std::io::stdout().is_terminal(),
+    }
 }
 
 async fn shutdown_signal() {
