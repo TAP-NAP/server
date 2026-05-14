@@ -6,6 +6,7 @@ use crate::{
         ChallengeResponse, CredentialStatus, CredentialStatusRequest, HealthResponse,
         RegistrationStatus, ServerCredentialStatus,
     },
+    openapi::{docs_redirect, openapi_json, swagger_ui},
     AppState,
 };
 use axum::{
@@ -17,6 +18,9 @@ use chrono::{Timelike, Utc};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/docs", get(docs_redirect))
+        .route("/openapi.json", get(openapi_json))
+        .route("/swagger-ui", get(swagger_ui))
         .route("/healthz", get(healthz))
         .route("/app-attest/challenges", post(create_challenge))
         .route("/app-attest/attestations", post(register_attestation))

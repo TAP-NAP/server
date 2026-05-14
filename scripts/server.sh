@@ -682,6 +682,32 @@ cmd_self_test() {
   docker exec "$APP_CONTAINER_NAME" curl -fsS "$APP_CONTAINER_HEALTH_URL" >/dev/null
   log_ok "App health check passed"
 
+  log_info "Checking OpenAPI JSON"
+  local openapi_response
+  openapi_response="$(docker exec "$APP_CONTAINER_NAME" curl -fsS "http://127.0.0.1:${APP_CONTAINER_PORT}/openapi.json")"
+  case "$openapi_response" in
+    *'"openapi"'*'"/app-attest/challenges"'*)
+      log_ok "OpenAPI JSON returned the expected API paths"
+      ;;
+    *)
+      printf '%s\n' "$openapi_response"
+      die "OpenAPI JSON did not include the expected fields"
+      ;;
+  esac
+
+  log_info "Checking Swagger UI page"
+  local swagger_response
+  swagger_response="$(docker exec "$APP_CONTAINER_NAME" curl -fsS "http://127.0.0.1:${APP_CONTAINER_PORT}/swagger-ui")"
+  case "$swagger_response" in
+    *'SwaggerUIBundle'*'/openapi.json'*)
+      log_ok "Swagger UI page returned successfully"
+      ;;
+    *)
+      printf '%s\n' "$swagger_response"
+      die "Swagger UI page did not include the expected boot script"
+      ;;
+  esac
+
   log_info "Requesting an attestation challenge"
   local challenge_response
   challenge_response="$(docker exec "$APP_CONTAINER_NAME" curl -fsS \

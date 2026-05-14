@@ -2,6 +2,7 @@ mod challenge;
 mod config;
 mod error;
 mod models;
+mod openapi;
 mod routes;
 mod store;
 mod verifier;

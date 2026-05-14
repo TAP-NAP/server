@@ -73,8 +73,9 @@ Run the built-in smoke test:
 ./scripts/server.sh self-test
 ```
 
-`self-test` checks Docker, Redis ping, app health, challenge creation, Redis key
-write, and challenge TTL. It deletes the test challenge key before exiting.
+`self-test` checks Docker, Redis ping, app health, OpenAPI JSON, Swagger UI,
+challenge creation, Redis key write, and challenge TTL. It deletes the test
+challenge key before exiting.
 
 ## Operations
 
@@ -188,10 +189,19 @@ cargo run
 ## Endpoints
 
 ```text
+GET  /docs
+GET  /swagger-ui
+GET  /openapi.json
 GET  /healthz
 POST /app-attest/challenges
 POST /app-attest/attestations
 POST /app-attest/credentials/status
+```
+
+Open the Swagger page after the service starts:
+
+```text
+http://127.0.0.1:8080/swagger-ui
 ```
 
 `/app-attest/challenges` accepts both `attestation` and `assertion` purposes so
