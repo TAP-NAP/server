@@ -56,6 +56,7 @@ Usage:
   ./scripts/server.sh start [--restore-from <backup.rdb>]
   ./scripts/server.sh stop [--no-backup]
   ./scripts/server.sh backup
+  ./scripts/server.sh self-test
   ./scripts/server.sh clean [--data|--all]
   ./scripts/server.sh status
   ./scripts/server.sh logs [--redis]
@@ -87,6 +88,7 @@ Examples:
   docker build -t ${APP_IMAGE} .
   ./scripts/server.sh init
   ./scripts/server.sh start
+  ./scripts/server.sh self-test
   ./scripts/server.sh backup
   ./scripts/server.sh stop
   ./scripts/server.sh start --restore-from /opt/tap-app-attest/backups/redis/redis-20260514-120000.rdb
@@ -662,6 +664,64 @@ cmd_logs() {
   docker logs -f "$target"
 }
 
+cmd_self_test() {
+  require_no_args "$@"
+  ensure_docker
+  load_env
+
+  container_running "$REDIS_CONTAINER_NAME" || die "Redis is not running. Start the service first: ./scripts/server.sh start"
+  container_running "$APP_CONTAINER_NAME" || die "App is not running. Start the service first: ./scripts/server.sh start"
+
+  log_info "Checking Redis ping"
+  if [ "$(docker exec "$REDIS_CONTAINER_NAME" redis-cli ping)" != "PONG" ]; then
+    die "Redis ping failed"
+  fi
+  log_ok "Redis ping returned PONG"
+
+  log_info "Checking app health inside the app container"
+  docker exec "$APP_CONTAINER_NAME" curl -fsS "$APP_CONTAINER_HEALTH_URL" >/dev/null
+  log_ok "App health check passed"
+
+  log_info "Requesting an attestation challenge"
+  local challenge_response
+  challenge_response="$(docker exec "$APP_CONTAINER_NAME" curl -fsS \
+    -X POST "http://127.0.0.1:${APP_CONTAINER_PORT}/app-attest/challenges" \
+    -H "Content-Type: application/json" \
+    -d '{"purpose":"attestation","credentialName":"self_test"}')"
+
+  case "$challenge_response" in
+    *'"challengeId"'*'"challenge"'*'"expiresAt"'*)
+      log_ok "Challenge endpoint returned the expected JSON shape"
+      ;;
+    *)
+      printf '%s\n' "$challenge_response"
+      die "Challenge endpoint response did not include challengeId, challenge, and expiresAt"
+      ;;
+  esac
+
+  local challenge_id
+  challenge_id="$(printf '%s' "$challenge_response" | sed -nE 's/.*"challengeId"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p')"
+  [ -n "$challenge_id" ] || die "Could not parse challengeId from challenge response"
+
+  local challenge_key="tap:challenge:${challenge_id}"
+  log_info "Checking Redis key written by challenge endpoint: $challenge_key"
+  if [ "$(docker exec "$REDIS_CONTAINER_NAME" redis-cli EXISTS "$challenge_key")" != "1" ]; then
+    die "Challenge key was not found in Redis: $challenge_key"
+  fi
+
+  local ttl
+  ttl="$(docker exec "$REDIS_CONTAINER_NAME" redis-cli TTL "$challenge_key")"
+  if [ "$ttl" -le 0 ]; then
+    die "Challenge key exists but has invalid TTL: $ttl"
+  fi
+  log_ok "Challenge key exists with TTL ${ttl}s"
+
+  log_info "Removing self-test challenge key"
+  docker exec "$REDIS_CONTAINER_NAME" redis-cli DEL "$challenge_key" >/dev/null || log_warn "Could not delete self-test key: $challenge_key"
+
+  log_ok "Self-test passed"
+}
+
 main() {
   local command="${1:-help}"
   if [ "$#" -gt 0 ]; then
@@ -684,6 +744,9 @@ main() {
       ;;
     backup)
       cmd_backup "$@"
+      ;;
+    self-test)
+      cmd_self_test "$@"
       ;;
     clean)
       cmd_clean "$@"
