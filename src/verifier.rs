@@ -51,12 +51,9 @@ impl AttestationVerifier {
         Ok(CredentialRecord {
             credential_name: request.credential_name.clone(),
             key_id: attested_key_id.clone(),
-            credential_id: attested_key_id,
+            attestation_object_base64_url: request.attestation_object.clone(),
             public_key_x962_base64_url: encode_base64_url(
                 &success.first_certificate_values.public_key_x962,
-            ),
-            public_key_sha256_base64_url: encode_base64_url(
-                &success.first_certificate_values.public_key_sha256,
             ),
             credential_public_key_cose_base64_url: encode_base64_url(
                 &success.parsed_auth_data.credential_public_key_cose,

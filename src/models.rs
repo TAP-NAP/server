@@ -112,9 +112,8 @@ pub struct ChallengeRecord {
 pub struct CredentialRecord {
     pub credential_name: String,
     pub key_id: String,
-    pub credential_id: String,
+    pub attestation_object_base64_url: String,
     pub public_key_x962_base64_url: String,
-    pub public_key_sha256_base64_url: String,
     pub credential_public_key_cose_base64_url: String,
     pub receipt_base64_url: String,
     pub team_id: String,
@@ -152,5 +151,34 @@ mod tests {
             serde_json::to_string(&ServerCredentialStatus::Accepted).unwrap(),
             r#""accepted""#
         );
+    }
+
+    #[test]
+    fn credential_record_uses_key_id_as_the_only_identifier() {
+        let record = CredentialRecord {
+            credential_name: "photo_keyid".to_string(),
+            key_id: "canonical-key-id".to_string(),
+            attestation_object_base64_url: "raw-attestation-object".to_string(),
+            public_key_x962_base64_url: "x962-public-key".to_string(),
+            credential_public_key_cose_base64_url: "cose-public-key".to_string(),
+            receipt_base64_url: "receipt".to_string(),
+            team_id: "TEAMID1234".to_string(),
+            bundle_id: "com.example.tapcam".to_string(),
+            environment: AppEnvironment::Development,
+            last_counter: None,
+            status: CredentialStatus::Active,
+            attestation_challenge_id: "challenge-id".to_string(),
+            created_at: "2026-05-14T00:00:00Z".parse().unwrap(),
+            updated_at: "2026-05-14T00:00:00Z".parse().unwrap(),
+        };
+
+        let value = serde_json::to_value(&record).unwrap();
+        assert_eq!(value["keyId"], "canonical-key-id");
+        assert_eq!(
+            value["attestationObjectBase64Url"],
+            "raw-attestation-object"
+        );
+        assert!(value.get("credentialId").is_none());
+        assert!(value.get("publicKeySha256Base64Url").is_none());
     }
 }

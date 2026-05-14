@@ -77,9 +77,8 @@ Value is JSON without TTL:
 {
   "credentialName": "photo_keyid",
   "keyId": "base64url credential id from authData",
-  "credentialId": "base64url credential id from authData",
+  "attestationObjectBase64Url": "original request attestationObject",
   "publicKeyX962Base64Url": "base64url X9.62 P-256 public key",
-  "publicKeySHA256Base64Url": "base64url sha256 public key",
   "credentialPublicKeyCoseBase64Url": "base64url COSE key from authData",
   "receiptBase64Url": "base64url Apple receipt",
   "teamId": "TEAMID1234",
@@ -98,6 +97,12 @@ Statuses:
 - `active`: accepted by `credentials/status`.
 - `revoked`: reported to clients as revoked.
 - `disabled`: also reported as revoked.
+
+`keyId` is the canonical base64url credential id proven by the attestation
+object and is also the Redis key suffix. We intentionally do not store duplicate
+`credentialId` or public-key-SHA256 identifier fields; the public verification
+material is kept as `publicKeyX962Base64Url` and
+`credentialPublicKeyCoseBase64Url`.
 
 ## Deployment State Semantics
 

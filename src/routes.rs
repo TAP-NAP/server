@@ -105,7 +105,7 @@ async fn register_attestation(
         }
     };
 
-    let credential_id = credential.credential_id.clone();
+    let credential_id = credential.key_id.clone();
     state.store.save_credential(&credential).await?;
 
     Ok(Json(AttestationResponse {
@@ -158,7 +158,7 @@ async fn idempotent_attestation_response(
         && credential.attestation_challenge_id == request.challenge_id
     {
         return Ok(Json(AttestationResponse {
-            credential_id: Some(credential.credential_id),
+            credential_id: Some(credential.key_id),
             status: RegistrationStatus::Accepted,
         }));
     }
