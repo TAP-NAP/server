@@ -1,9 +1,0 @@
-{
-	email {$ACME_EMAIL}
-}
-
-{$DOMAIN} {
-	encode zstd gzip
-
-	reverse_proxy app:8080
-}

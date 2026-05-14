@@ -22,31 +22,20 @@ Copy the example environment file and fill in your Apple app identifiers:
 cp .env.example .env
 ```
 
-Required values:
+`.env.example` is written for the `scripts/server.sh` Docker deployment. Fill in
+your Apple identifiers and keep these Docker-facing values:
 
 ```text
+SERVER_ADDR=0.0.0.0:8080
+REDIS_URL=redis://tap-app-attest-redis:6379
 TEAM_ID=YOUR_APPLE_TEAM_ID
 BUNDLE_ID=com.example.tapcam
 APP_ATTEST_ENV=production
-```
-
-For local direct startup, `REDIS_URL` usually points to localhost:
-
-```text
-REDIS_URL=redis://127.0.0.1:6379
-APPLE_APP_ATTEST_ROOT_CA_PATH=certs/apple_app_attestation_root_ca.pem
-```
-
-For Docker Compose, `docker-compose.yml` deliberately uses container-internal
-values even if your `.env` has local direct-start values:
-
-```text
-REDIS_URL=redis://redis:6379
 APPLE_APP_ATTEST_ROOT_CA_PATH=/app/certs/apple_app_attestation_root_ca.pem
 ```
 
-Inside Docker, `127.0.0.1` means "this same container", so the app container
-must connect to Redis through the Compose service name `redis`, not localhost.
+`scripts/server.sh` reads and validates `.env`, then passes the same file into
+the app container. It does not keep a second set of app environment values.
 
 ## Start Directly
 
@@ -63,14 +52,15 @@ set -a
 source .env
 set +a
 
+export SERVER_ADDR=127.0.0.1:8080
+export REDIS_URL=redis://127.0.0.1:6379
+export APPLE_APP_ATTEST_ROOT_CA_PATH=certs/apple_app_attestation_root_ca.pem
+
 cargo run
 ```
 
-The server listens on `SERVER_ADDR`, defaulting to:
-
-```text
-0.0.0.0:8080
-```
+Those three overrides are only for direct local `cargo run`. The checked-in
+`.env.example` is intentionally shaped for Docker deployment.
 
 Health check:
 
@@ -86,37 +76,12 @@ curl -sS -X POST http://127.0.0.1:8080/app-attest/challenges \
   -d '{"purpose":"attestation","credentialName":"photo_keyid"}'
 ```
 
-## Start With Docker
+## Local Docker Compose
 
-On macOS, the easiest Homebrew path is Docker Desktop:
-
-```sh
-brew install --cask docker
-open -a Docker
-```
-
-Wait until Docker Desktop finishes starting, then check:
-
-```sh
-docker version
-docker compose version
-```
-
-Installing only `brew install docker` gives you the Docker CLI, but not a
-running Docker Engine on macOS. You still need Docker Desktop or another Linux
-VM backend such as Colima.
-
-Fill in `.env`, then run:
+For local development or a quick smoke test:
 
 ```sh
 docker compose up --build
-```
-
-If your Docker installation uses the legacy Compose v1 binary, use the
-hyphenated command instead:
-
-```sh
-docker-compose up --build
 ```
 
 This starts:
@@ -124,77 +89,111 @@ This starts:
 - `app`: the Rust HTTP server on port `8080`
 - `redis`: Redis 7 with AOF persistence enabled
 
-Health check:
-
-```sh
-curl http://127.0.0.1:8080/healthz
-```
-
-Stop the stack:
+Stop it with:
 
 ```sh
 docker compose down
 ```
 
-Legacy Compose v1:
-
-```sh
-docker-compose down
-```
-
-Remove Redis data as well:
+Remove the Compose-managed Redis volume only when you intentionally want to
+delete local Compose data:
 
 ```sh
 docker compose down -v
 ```
 
-Legacy Compose v1:
+## Server Script Deployment
+
+For a server where you already have this repository and want Redis data stored
+outside containers, build the app image first:
 
 ```sh
-docker-compose down -v
+docker build -t tap-app-attest-server:latest .
 ```
 
-## Start From An Existing Image
-
-If you already built the image and placed a `.env` file in this directory, use:
+Then use the single deployment entrypoint:
 
 ```sh
-./scripts/start.sh
+./scripts/server.sh help
+./scripts/server.sh init
+./scripts/server.sh start
 ```
 
-The script starts an external Redis container, starts the app container, and
-wires both containers into the same Docker network. Hardcoded deployment values
-live at the top of `scripts/start.sh`:
+The script starts:
+
+- app container: `tap-app-attest-server`
+- Redis container: `tap-app-attest-redis`
+- Docker network: `tap-app-attest-net`
+
+Redis data is stored on the host:
 
 ```text
-APP_IMAGE=tap-app-attest-server:latest
-REDIS_ADDRESS=redis://tap-app-attest-redis:6379
-REDIS_DATA_DIR=/opt/tap-app-attest/data/redis
+/opt/tap-app-attest/data/redis
 ```
 
-Redis data is bind-mounted to `REDIS_DATA_DIR`, so it is not only stored inside
-the Redis container.
+Redis backups are stored on the host:
 
-Stop both containers:
+```text
+/opt/tap-app-attest/backups/redis
+```
+
+### Data Semantics
+
+`stop` does not delete Redis data:
 
 ```sh
-./scripts/stop.sh
+./scripts/server.sh stop
 ```
 
-By default, `stop.sh` stops Redis but keeps the Redis container and host data.
-To remove the Redis container as well:
+A later normal start loads the existing Redis data directory, so challenge and
+credential records are preserved:
 
 ```sh
-REMOVE_REDIS=1 ./scripts/stop.sh
+./scripts/server.sh start
 ```
 
-If an old Redis container with the same name exists but was not created with the
-expected host data directory, `start.sh` refuses to delete it automatically. To
-recreate it after you have confirmed there is no data you need inside:
+To create a Redis backup while Redis is running:
 
 ```sh
-RECREATE_REDIS=1 ./scripts/start.sh
+./scripts/server.sh backup
 ```
+
+To start from a backup, the script replaces the managed Redis data directory
+with the given RDB file and then starts Redis and the app:
+
+```sh
+./scripts/server.sh start --restore-from /opt/tap-app-attest/backups/redis/redis-20260514-120000.rdb
+```
+
+To remove containers and the Docker network but keep Redis data:
+
+```sh
+./scripts/server.sh clean
+```
+
+To start from an empty Redis state:
+
+```sh
+./scripts/server.sh clean --data
+./scripts/server.sh start
+```
+
+To delete containers, network, image, Redis data, and backups:
+
+```sh
+./scripts/server.sh clean --all
+```
+
+Status and logs:
+
+```sh
+./scripts/server.sh status
+./scripts/server.sh logs
+./scripts/server.sh logs --redis
+```
+
+By default the script binds the app to `127.0.0.1:8080` on the host. Put Caddy,
+Nginx, or another HTTPS reverse proxy in front of it for a public domain.
 
 ## Implemented Endpoints
 
@@ -212,6 +211,5 @@ only verifies attestation objects.
 ## More Docs
 
 - `docs/REFERENCE_CONTRACTS.md`: upstream contracts this server follows
-- `docs/REDIS_SCHEMA.md`: Redis keys, fields, TTLs, and status values
-- `docs/DEPLOYMENT.md`: production deployment from a fresh server
+- `docs/REDIS_SCHEMA.md`: Redis keys, fields, TTLs, and persistence behavior
 - `docs/ROADMAP.md`: planned assertion and TAP Depth HEIC verification work

@@ -1,7 +1,24 @@
 # Redis Schema
 
-Redis is the only v1 datastore. Enable AOF and back up Redis in production
-because credentials are durable security state.
+Redis is the only v1 datastore. In the script-managed deployment, Redis runs in
+a container but stores data on the host:
+
+```text
+/opt/tap-app-attest/data/redis
+```
+
+Backups are Redis RDB snapshots stored under:
+
+```text
+/opt/tap-app-attest/backups/redis
+```
+
+Credentials are durable security state, so production should keep host-level
+backups of this directory or regularly run:
+
+```sh
+./scripts/server.sh backup
+```
 
 ## Challenge Records
 
@@ -59,7 +76,7 @@ Value is JSON without TTL:
 ```json
 {
   "credentialName": "photo_keyid",
-  "keyId": "apple key id",
+  "keyId": "base64url credential id from authData",
   "credentialId": "base64url credential id from authData",
   "publicKeyX962Base64Url": "base64url X9.62 P-256 public key",
   "publicKeySHA256Base64Url": "base64url sha256 public key",
@@ -81,3 +98,15 @@ Statuses:
 - `active`: accepted by `credentials/status`.
 - `revoked`: reported to clients as revoked.
 - `disabled`: also reported as revoked.
+
+## Deployment State Semantics
+
+`./scripts/server.sh stop` stops the containers but does not delete Redis data.
+A later `./scripts/server.sh start` loads the existing data directory.
+
+`./scripts/server.sh start --restore-from <backup.rdb>` replaces the managed
+Redis data directory with the given RDB file, then starts Redis and the app.
+
+`./scripts/server.sh clean` removes containers and the Docker network only.
+`./scripts/server.sh clean --data` also deletes Redis data. `clean --all`
+deletes Redis data, backups, and the app image.
