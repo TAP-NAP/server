@@ -35,7 +35,9 @@ APPLE_APP_ATTEST_ROOT_CA_PATH=/app/certs/apple_app_attestation_root_ca.pem
 ```
 
 `scripts/server.sh` reads and validates `.env`, then passes the same file into
-the app container. It does not keep a second set of app environment values.
+the app container. The only value it overrides for Docker is
+`APPLE_APP_ATTEST_ROOT_CA_PATH`, because the certificate path inside the image is
+fixed at `/app/certs/apple_app_attestation_root_ca.pem`.
 
 ## Start Directly
 

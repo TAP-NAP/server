@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Deployment constants. The application runtime configuration still comes from
-# .env; these values describe this server's Docker topology.
+# Deployment constants. Most app configuration comes from .env; these values
+# describe this server's Docker topology.
 APP_IMAGE="tap-app-attest-server:latest"
 APP_CONTAINER_NAME="tap-app-attest-server"
 REDIS_CONTAINER_NAME="tap-app-attest-redis"
@@ -127,21 +127,18 @@ load_env() {
   local app_attest_env
   local server_addr
   local redis_url
-  local root_ca_path
 
   team_id="$(read_env_value TEAM_ID)"
   bundle_id="$(read_env_value BUNDLE_ID)"
   app_attest_env="$(read_env_value APP_ATTEST_ENV)"
   server_addr="$(read_env_value SERVER_ADDR)"
   redis_url="$(read_env_value REDIS_URL)"
-  root_ca_path="$(read_env_value APPLE_APP_ATTEST_ROOT_CA_PATH)"
 
   [ -n "$team_id" ] || die "TEAM_ID is required in .env"
   [ -n "$bundle_id" ] || die "BUNDLE_ID is required in .env"
   [ -n "$app_attest_env" ] || die "APP_ATTEST_ENV is required in .env"
   [ -n "$server_addr" ] || die "SERVER_ADDR is required in .env"
   [ -n "$redis_url" ] || die "REDIS_URL is required in .env"
-  [ -n "$root_ca_path" ] || die "APPLE_APP_ATTEST_ROOT_CA_PATH is required in .env"
 
   if [ "$server_addr" != "0.0.0.0:${APP_CONTAINER_PORT}" ]; then
     die "SERVER_ADDR must be 0.0.0.0:${APP_CONTAINER_PORT} for Docker deployment; current value: $server_addr"
@@ -149,10 +146,6 @@ load_env() {
 
   if [ "$redis_url" != "$REDIS_ADDRESS" ]; then
     die "REDIS_URL must be $REDIS_ADDRESS for this Docker network; current value: $redis_url"
-  fi
-
-  if [ "$root_ca_path" != "$CONTAINER_ROOT_CA_PATH" ]; then
-    die "APPLE_APP_ATTEST_ROOT_CA_PATH must be $CONTAINER_ROOT_CA_PATH for the app container; current value: $root_ca_path"
   fi
 
   log_ok ".env loaded and validated for Docker deployment"
@@ -401,6 +394,7 @@ start_app() {
     --restart unless-stopped \
     --network "$DOCKER_NETWORK_NAME" \
     --env-file .env \
+    -e APPLE_APP_ATTEST_ROOT_CA_PATH="$CONTAINER_ROOT_CA_PATH" \
     -p "${APP_HOST_BIND}:${APP_PORT}:${APP_CONTAINER_PORT}" \
     "$APP_IMAGE" >/dev/null
 
