@@ -76,6 +76,56 @@ pub struct CredentialStatusRequest {
     pub key_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct CaptureSignatureVerifyRequest {
+    pub key_id: String,
+    pub assertion_object: String,
+    pub signing_binding: CaptureSigningBinding,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureSigningBinding {
+    #[serde(rename = "bodySHA256")]
+    pub body_sha256: String,
+    #[serde(rename = "captureID")]
+    pub capture_id: String,
+    pub operation: String,
+    #[serde(rename = "schemaID")]
+    pub schema_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureSignatureVerifyResponse {
+    pub status: CaptureSignatureStatus,
+    pub key_id: String,
+    #[serde(rename = "signingBindingSHA256")]
+    pub signing_binding_sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<CaptureSignatureInvalidReason>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CaptureSignatureStatus {
+    Valid,
+    Invalid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CaptureSignatureInvalidReason {
+    KeyNotRegistered,
+    CredentialNotActive,
+    SchemaInvalid,
+    OperationInvalid,
+    BindingInvalid,
+    SignatureInvalid,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ServerCredentialStatus {
@@ -150,6 +200,49 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&ServerCredentialStatus::Accepted).unwrap(),
             r#""accepted""#
+        );
+    }
+
+    #[test]
+    fn capture_signature_request_matches_contract_json() {
+        let request: CaptureSignatureVerifyRequest = serde_json::from_str(
+            r#"{"keyId":"key","assertionObject":"assertion","signingBinding":{"schemaID":"urn:tapnap:tapcam:app-attest-capture-signing:v1","operation":"tapcam.capture.sign","captureID":"capture-1","bodySHA256":"body-hash"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(request.key_id, "key");
+        assert_eq!(request.assertion_object, "assertion");
+        assert_eq!(
+            request.signing_binding.schema_id,
+            "urn:tapnap:tapcam:app-attest-capture-signing:v1"
+        );
+        assert_eq!(request.signing_binding.operation, "tapcam.capture.sign");
+        assert_eq!(request.signing_binding.capture_id, "capture-1");
+        assert_eq!(request.signing_binding.body_sha256, "body-hash");
+    }
+
+    #[test]
+    fn capture_signature_response_matches_contract_json() {
+        let valid = CaptureSignatureVerifyResponse {
+            status: CaptureSignatureStatus::Valid,
+            key_id: "key".to_string(),
+            signing_binding_sha256: "hash".to_string(),
+            reason: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&valid).unwrap(),
+            r#"{"status":"valid","keyId":"key","signingBindingSHA256":"hash"}"#
+        );
+
+        let invalid = CaptureSignatureVerifyResponse {
+            status: CaptureSignatureStatus::Invalid,
+            key_id: "key".to_string(),
+            signing_binding_sha256: "hash".to_string(),
+            reason: Some(CaptureSignatureInvalidReason::SignatureInvalid),
+        };
+        assert_eq!(
+            serde_json::to_string(&invalid).unwrap(),
+            r#"{"status":"invalid","keyId":"key","signingBindingSHA256":"hash","reason":"signatureInvalid"}"#
         );
     }
 

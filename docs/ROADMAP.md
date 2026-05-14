@@ -20,10 +20,10 @@ implementation status.
 - [x] Return AppAttestKit-compatible credential status.
 - [x] Run as Docker app plus Redis using `scripts/server.sh`.
 
-## v2: [NEW] TAPCam Capture Signature Verification Plan
+## v2: [NEW] TAPCam Capture Signature Verification
 
-- [ ] Add `POST /tapcam/capture-signatures/verify`.
-- [ ] Accept request body:
+- [x] Add `POST /tapcam/capture-signatures/verify`.
+- [x] Accept request body:
 
   ```json
   {
@@ -38,7 +38,7 @@ implementation status.
   }
   ```
 
-- [ ] Return valid response:
+- [x] Return valid response:
 
   ```json
   {
@@ -48,19 +48,19 @@ implementation status.
   }
   ```
 
-- [ ] Return invalid verification results with HTTP 200, `status: "invalid"`,
+- [x] Return invalid verification results with HTTP 200, `status: "invalid"`,
   and a machine-readable reason.
-- [ ] Canonicalize `keyId` and check `tap:credential:{keyId}` exists.
-- [ ] Require credential `status=active`.
-- [ ] Validate `signingBinding.schemaID`.
-- [ ] Validate `signingBinding.operation == "tapcam.capture.sign"`.
-- [ ] Validate non-empty `captureID` and `bodySHA256`.
-- [ ] Serialize `signingBinding` as canonical JSON matching TAPCamDemo rules:
+- [x] Canonicalize `keyId` and check `tap:credential:{keyId}` exists.
+- [x] Require credential `status=active`.
+- [x] Validate `signingBinding.schemaID`.
+- [x] Validate `signingBinding.operation == "tapcam.capture.sign"`.
+- [x] Validate non-empty `captureID` and `bodySHA256`.
+- [x] Serialize `signingBinding` as canonical JSON matching TAPCamDemo rules:
   sorted keys and unescaped slashes.
-- [ ] Compute `signingBindingSHA256`.
-- [ ] Verify App Attest assertion signature using stored
+- [x] Compute `signingBindingSHA256`.
+- [x] Verify App Attest assertion signature using stored
   `publicKeyX962Base64Url`.
-- [ ] Use `AssertionCounterPolicy::Unchecked`; offline captures may upload out
+- [x] Use `AssertionCounterPolicy::Unchecked`; offline captures may upload out
   of order, so counter monotonicity must not decide validity.
 
 Canceled or replaced goals:

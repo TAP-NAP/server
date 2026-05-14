@@ -4,7 +4,10 @@ use crate::{
     error::AppError,
     models::{AppEnvironment, AttestationRequest, CredentialRecord, CredentialStatus},
 };
-use apple_app_attest_attestation::{parse_and_verify_attestation, AttestationVerificationContext};
+use apple_app_attest_attestation::{
+    parse_and_verify_assertion, parse_and_verify_attestation, AssertionCounterPolicy,
+    AssertionErrorCode, AssertionVerificationContext, AttestationVerificationContext,
+};
 use chrono::{Timelike, Utc};
 use std::sync::Arc;
 
@@ -68,6 +71,37 @@ impl AttestationVerifier {
             created_at: now,
             updated_at: now,
         })
+    }
+
+    pub fn verify_capture_signature(
+        &self,
+        assertion_object_base64_url: &str,
+        credential: &CredentialRecord,
+        client_data: Vec<u8>,
+    ) -> Result<bool, AppError> {
+        let assertion_object = decode_base64_url(assertion_object_base64_url).map_err(|err| {
+            AppError::InvalidInput(format!("assertionObject is not valid base64url: {err}"))
+        })?;
+        let public_key_x962 =
+            decode_base64_url(&credential.public_key_x962_base64_url).map_err(|err| {
+                AppError::Internal(format!("stored publicKeyX962Base64Url is invalid: {err}"))
+            })?;
+
+        let context = AssertionVerificationContext {
+            client_data,
+            public_key_x962,
+            team_id: self.config.team_id.clone(),
+            bundle_id: self.config.bundle_id.clone(),
+            counter_policy: AssertionCounterPolicy::Unchecked,
+        };
+
+        match parse_and_verify_assertion(&assertion_object, &context) {
+            Ok(_) => Ok(true),
+            Err(error) if error.error_code == AssertionErrorCode::PublicKeyInvalid => Err(
+                AppError::Internal(format!("stored publicKeyX962Base64Url is invalid: {error}")),
+            ),
+            Err(_) => Ok(false),
+        }
     }
 }
 

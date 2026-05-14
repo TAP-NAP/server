@@ -1,7 +1,7 @@
 # Reference Contracts
 
-This server implements the first App Attest backend slice required by
-TAPCamDemo and AppAttestKit.
+This server implements the App Attest backend slice required by TAPCamDemo and
+AppAttestKit, plus the TAPCam capture signature verification endpoint.
 
 ## Primary Contracts
 
@@ -14,16 +14,48 @@ TAPCamDemo and AppAttestKit.
 - Rust verifier crate:
   https://github.com/TAP-NAP/attestation_assertion_verifier
 
-## v1 Compatibility Notes
+## App Attest Compatibility Notes
 
 - `POST /app-attest/challenges` accepts both `attestation` and `assertion`
   purposes because AppAttestKit asks the same backend for both flows.
-- `POST /app-attest/attestations` verifies only attestation objects and stores
-  the App Attest public key needed by future assertion verification.
+- `POST /app-attest/attestations` verifies attestation objects and stores the
+  App Attest public key needed by assertion verification.
 - `POST /app-attest/credentials/status` returns a bare JSON enum string because
   AppAttestKit decodes `AppAttestServerCredentialStatus` directly.
-- Assertion verification and TAP Depth HEIC full file verification are roadmap
-  items, not v1 trust decisions.
+- The server stores the original `attestationObject` and checks that request
+  `keyId` matches the credential id proven inside the attestation object.
+
+## TAPCam Capture Signature Contract
+
+`POST /tapcam/capture-signatures/verify` verifies that an already registered and
+active App Attest `keyId` signed a TAPCam capture binding:
+
+```json
+{
+  "keyId": "...",
+  "assertionObject": "...",
+  "signingBinding": {
+    "schemaID": "urn:tapnap:tapcam:app-attest-capture-signing:v1",
+    "operation": "tapcam.capture.sign",
+    "captureID": "...",
+    "bodySHA256": "..."
+  }
+}
+```
+
+The server serializes `signingBinding` as canonical JSON with sorted keys and
+unescaped slashes, then uses those bytes as App Attest assertion client data.
+The returned `signingBindingSHA256` is the base64url SHA-256 digest of that
+canonical JSON.
+
+There is no long-term assertion challenge in this flow. Offline captures can be
+uploaded out of order, so assertion counter monotonicity is unchecked and replay
+or `captureID` deduplication remains part of the future full HEIC verification
+policy.
+
+This endpoint does not verify the original image bytes or recompute
+`bodySHA256`; it only proves that the registered App Attest key signed the
+submitted binding.
 
 ## Client Data Hash Rule
 

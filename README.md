@@ -1,12 +1,13 @@
 # TAP App Attest Server
 
 Rust server for the TAPCamDemo App Attest backend contract. This version
-implements the App Attest attestation registration flow:
+implements App Attest registration plus TAPCam capture signature verification:
 
 - issue one-hour App Attest challenges
 - verify Apple App Attest attestation objects
 - store verified credentials in Redis
 - report credential status back to AppAttestKit clients
+- verify that a registered App Attest key signed a TAPCam capture binding
 
 The deployment path is intentionally single-lane: build one Docker image, then
 manage the app and Redis through `scripts/server.sh`. This repository no longer
@@ -192,14 +193,48 @@ GET  /healthz
 POST /app-attest/challenges
 POST /app-attest/attestations
 POST /app-attest/credentials/status
+POST /tapcam/capture-signatures/verify
 ```
 
 `/app-attest/challenges` accepts both `attestation` and `assertion` purposes so
-the API shape is ready for TAPCamDemo's later assertion flow. This v1 server
-only verifies attestation objects.
+the AppAttestKit challenge contract stays compatible. Capture signature
+verification does not use a long-term assertion challenge; it verifies the
+signature over the submitted `signingBinding` payload.
+
+Verify a TAPCam capture signature:
+
+```sh
+curl -sS -X POST http://127.0.0.1:8080/tapcam/capture-signatures/verify \
+  -H 'content-type: application/json' \
+  -d '{
+    "keyId": "...",
+    "assertionObject": "...",
+    "signingBinding": {
+      "schemaID": "urn:tapnap:tapcam:app-attest-capture-signing:v1",
+      "operation": "tapcam.capture.sign",
+      "captureID": "...",
+      "bodySHA256": "..."
+    }
+  }'
+```
+
+Success returns:
+
+```json
+{
+  "status": "valid",
+  "keyId": "...",
+  "signingBindingSHA256": "..."
+}
+```
+
+Semantic verification failures return HTTP 200 with `status: "invalid"` and a
+reason. This endpoint proves that the registered App Attest key signed the
+`signingBinding`; it does not upload or re-hash the original photo bytes.
 
 ## More Docs
 
 - `docs/REFERENCE_CONTRACTS.md`: upstream contracts this server follows
 - `docs/REDIS_SCHEMA.md`: Redis keys, fields, TTLs, and persistence behavior
-- `docs/ROADMAP.md`: planned assertion and TAP Depth HEIC verification work
+- `docs/ROADMAP.md`: shipped capture signature verification and planned TAP
+  Depth HEIC verification work

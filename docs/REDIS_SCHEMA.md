@@ -1,7 +1,8 @@
 # Redis Schema
 
-Redis is the only v1 datastore. In the script-managed deployment, Redis runs in
-a container but stores data on the host:
+Redis is the datastore for App Attest challenge and credential state. In the
+script-managed deployment, Redis runs in a container but stores data on the
+host:
 
 ```text
 /opt/tap-app-attest/data/redis
@@ -62,6 +63,10 @@ Statuses:
 `consume_challenge` uses a Redis Lua script so two concurrent requests cannot
 reuse the same challenge. Used or failed records remain until their TTL ends so
 short-term debugging can still inspect them.
+
+`POST /tapcam/capture-signatures/verify` does not create challenge records. The
+capture signature flow signs the submitted `signingBinding` directly and does
+not use a long-term assertion challenge.
 
 ## Credential Records
 
