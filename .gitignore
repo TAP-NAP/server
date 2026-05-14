@@ -22,8 +22,10 @@ target
 
 .env
 *.log
+.DS_Store
 
 # Redis local persistence files
 dump.rdb
 appendonlydir/
 *.aof
+data/

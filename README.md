@@ -154,6 +154,48 @@ Legacy Compose v1:
 docker-compose down -v
 ```
 
+## Start From An Existing Image
+
+If you already built the image and placed a `.env` file in this directory, use:
+
+```sh
+./scripts/start.sh
+```
+
+The script starts an external Redis container, starts the app container, and
+wires both containers into the same Docker network. Hardcoded deployment values
+live at the top of `scripts/start.sh`:
+
+```text
+APP_IMAGE=tap-app-attest-server:latest
+REDIS_ADDRESS=redis://tap-app-attest-redis:6379
+REDIS_DATA_DIR=/opt/tap-app-attest/data/redis
+```
+
+Redis data is bind-mounted to `REDIS_DATA_DIR`, so it is not only stored inside
+the Redis container.
+
+Stop both containers:
+
+```sh
+./scripts/stop.sh
+```
+
+By default, `stop.sh` stops Redis but keeps the Redis container and host data.
+To remove the Redis container as well:
+
+```sh
+REMOVE_REDIS=1 ./scripts/stop.sh
+```
+
+If an old Redis container with the same name exists but was not created with the
+expected host data directory, `start.sh` refuses to delete it automatically. To
+recreate it after you have confirmed there is no data you need inside:
+
+```sh
+RECREATE_REDIS=1 ./scripts/start.sh
+```
+
 ## Implemented Endpoints
 
 ```text
@@ -171,4 +213,5 @@ only verifies attestation objects.
 
 - `docs/REFERENCE_CONTRACTS.md`: upstream contracts this server follows
 - `docs/REDIS_SCHEMA.md`: Redis keys, fields, TTLs, and status values
+- `docs/DEPLOYMENT.md`: production deployment from a fresh server
 - `docs/ROADMAP.md`: planned assertion and TAP Depth HEIC verification work
