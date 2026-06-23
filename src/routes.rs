@@ -13,10 +13,14 @@ use crate::{
 };
 use axum::{
     extract::State,
+    http::{header::CONTENT_TYPE, HeaderValue, Method},
     routing::{get, post},
     Json, Router,
 };
 use chrono::{Timelike, Utc};
+use tower_http::cors::CorsLayer;
+
+const TAPCAM_VERIFIER_ORIGIN: &str = "https://verifier.tapnap.net";
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -25,10 +29,17 @@ pub fn router(state: AppState) -> Router {
         .route("/app-attest/attestations", post(register_attestation))
         .route(
             "/tapcam/capture-signatures/verify",
-            post(verify_capture_signature),
+            post(verify_capture_signature).layer(tapcam_verifier_cors()),
         )
         .route("/app-attest/credentials/status", post(credential_status))
         .with_state(state)
+}
+
+fn tapcam_verifier_cors() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(HeaderValue::from_static(TAPCAM_VERIFIER_ORIGIN))
+        .allow_methods([Method::POST, Method::OPTIONS])
+        .allow_headers([CONTENT_TYPE])
 }
 
 async fn healthz(State(state): State<AppState>) -> Result<Json<HealthResponse>, AppError> {
@@ -440,6 +451,11 @@ fn utc_now_seconds() -> chrono::DateTime<Utc> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{
+        body::Body,
+        http::{header, Request, StatusCode},
+    };
+    use tower::ServiceExt;
 
     fn sample_binding() -> CaptureSigningBinding {
         CaptureSigningBinding {
@@ -494,6 +510,84 @@ mod tests {
         assert_eq!(
             validate_capture_signing_binding(&binding),
             Some(CaptureSignatureInvalidReason::BindingInvalid)
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_capture_signature_preflight_allows_verifier_origin() {
+        let app = Router::new().route(
+            "/tapcam/capture-signatures/verify",
+            post(|| async {}).layer(tapcam_verifier_cors()),
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/tapcam/capture-signatures/verify")
+                    .header(header::ORIGIN, TAPCAM_VERIFIER_ORIGIN)
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some(&HeaderValue::from_static(TAPCAM_VERIFIER_ORIGIN))
+        );
+
+        let allow_methods = response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let allow_headers = response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+            .unwrap()
+            .to_str()
+            .unwrap();
+
+        assert!(allow_methods
+            .split(',')
+            .any(|method| method.trim() == "POST"));
+        assert!(allow_methods
+            .split(',')
+            .any(|method| method.trim() == "OPTIONS"));
+        assert!(allow_headers
+            .split(',')
+            .any(|header| header.trim().eq_ignore_ascii_case("content-type")));
+    }
+
+    #[tokio::test]
+    async fn verify_capture_signature_post_allows_verifier_origin() {
+        let app = Router::new().route(
+            "/tapcam/capture-signatures/verify",
+            post(|| async { StatusCode::NO_CONTENT }).layer(tapcam_verifier_cors()),
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/tapcam/capture-signatures/verify")
+                    .header(header::ORIGIN, TAPCAM_VERIFIER_ORIGIN)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some(&HeaderValue::from_static(TAPCAM_VERIFIER_ORIGIN))
         );
     }
 }
