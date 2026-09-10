@@ -18,7 +18,7 @@ implementation status.
 - [x] Store original `attestationObject` with the credential record.
 - [x] Store `keyId -> publicKeyX962Base64Url` in Redis.
 - [x] Return AppAttestKit-compatible credential status.
-- [x] Run as Docker app plus Redis using `scripts/server.sh`.
+- [x] Run as Docker app plus Redis using the host `tap` console.
 
 ## v2: [NEW] TAPCam Capture Signature Verification
 

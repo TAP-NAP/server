@@ -18,7 +18,7 @@ Credentials are durable security state, so production should keep host-level
 backups of this directory or regularly run:
 
 ```sh
-./scripts/server.sh backup
+sudo tap backup
 ```
 
 ## Challenge Records
@@ -111,12 +111,12 @@ material is kept as `publicKeyX962Base64Url` and
 
 ## Deployment State Semantics
 
-`./scripts/server.sh stop` stops the containers but does not delete Redis data.
-A later `./scripts/server.sh start` loads the existing data directory.
+`tap stop` stops the backend, saves an RDB backup, then stops Redis. It retains
+Redis data. `tap start`, `tap restart` and `tap update server` reuse the same
+persistent directory; backend updates leave Redis running.
 
-`./scripts/server.sh start --restore-from <backup.rdb>` replaces the managed
-Redis data directory with the given RDB file, then starts Redis and the app.
-
-`./scripts/server.sh clean` removes containers and the Docker network only.
-`./scripts/server.sh clean --data` also deletes Redis data. `clean --all`
-deletes Redis data, backups, and the app image.
+`tap backup` exports an RDB snapshot while Redis is running. Copy backups off
+the host. To restore a snapshot, stop both containers first and follow Redis's
+RDB restore procedure with an empty data directory; existing AOF files take
+precedence over an RDB. The console has no automatic restore or data-deletion
+command. See the [host console instructions](../deploy/README.md).

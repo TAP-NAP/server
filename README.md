@@ -1,223 +1,70 @@
 # TAP App Attest Server
 
-Rust server for the TAPCamDemo App Attest backend contract. This version
-implements App Attest registration plus TAPCam capture signature verification:
+Rust backend for TAPCam App Attest registration and capture-signature verification:
 
-- issue one-hour App Attest challenges
-- verify Apple App Attest attestation objects
-- store verified credentials in Redis
-- report credential status back to AppAttestKit clients
-- verify that a registered App Attest key signed a TAPCam capture binding
+- issue one-hour App Attest challenges;
+- verify attestation objects against Apple's App Attest root CA;
+- store verified credentials in Redis and report their status;
+- verify that a registered key signed a TAPCam capture binding.
 
-The deployment path is intentionally single-lane: build one Docker image, then
-manage the app and Redis through `scripts/server.sh`. This repository no longer
-uses Docker Compose, so Redis persistence, backup, restore, and cleanup all have
-one set of semantics.
+## Deploy and operate
 
-## Website deployment
-
-The host-side [website deployment tool](deploy/README.md) pulls verified
-TAPCamVerifier build artifacts from GitHub and publishes them through host Nginx.
-Install `deploy/tap` once; no frontend checkout or build toolchain is needed on
-ECS. Its website commands are independent of the backend/Redis operations below.
-
-## Configuration
-
-Create `.env` from the example:
+The host [tap console](deploy/README.md) manages the Docker backend and Redis,
+pulls the GitHub-built website, configures Nginx and sets up Let's Encrypt.
+It is one Bash script installed on ECS, independent of any source checkout.
 
 ```sh
-cp .env.example .env
+sudo tap config
+sudo tap setup
+sudo tap status
+sudo tap update
 ```
 
-Fill in your Apple identifiers:
+ACR builds the backend automatically from GitHub; `tap update server` manually
+pulls that image on ECS. `tap update web` pulls the frontend's generated
+`ecs-web` branch. No builds run on ECS and GitHub receives no ECS SSH key.
 
-```env
-SERVER_ADDR=0.0.0.0:8080
-REDIS_URL=redis://tap-app-attest-redis:6379
-TEAM_ID=YOUR_APPLE_TEAM_ID
-BUNDLE_ID=com.example.tapcam
-APP_ATTEST_ENV=production
-APPLE_APP_ATTEST_ROOT_CA_PATH=/app/certs/apple_app_attestation_root_ca.pem
-CHALLENGE_TTL_SECONDS=3600
-REQUEST_LOGS=false
-RUST_LOG=tap_app_attest_server=info,tower_http=warn
-LOG_COLOR=always
-```
+Apple's root CA is copied into the image at
+`/app/certs/apple_app_attestation_root_ca.pem`. The Docker environment supplies
+its path and Rust reads the file at startup; no host certificate mount is needed.
+`APP_ATTEST_ENV=production` must match the App's App Attest environment, and is
+unrelated to the website's HTTPS certificate.
 
-`SERVER_ADDR` and `REDIS_URL` should keep these Docker values for
-`scripts/server.sh`. The script reads and validates `.env`, then passes it into
-the app container. It only overrides `APPLE_APP_ATTEST_ROOT_CA_PATH` at container
-startup because the certificate is copied into the image at a fixed path.
+Redis persists at `/opt/tap-app-attest/data/redis`; `tap backup` exports RDB
+snapshots to `/opt/tap-app-attest/backups/redis`. Starts and updates retain data.
 
-## Build
+The backend logs safe operation summaries without printing attestation/assertion
+objects or raw challenges. Per-request business logs default to off. Change
+`REQUEST_LOGS` and `RUST_LOG` in `tap config`, then run `tap restart` and `tap logs`
+when diagnosing requests.
 
-Build the image expected by `scripts/server.sh`:
+## Local development
+
+For a local image build:
 
 ```sh
 docker build -t tap-app-attest-server:latest .
 ```
 
-The image contains the Rust server binary and:
-
-```text
-/app/certs/apple_app_attestation_root_ca.pem
-```
-
-## Start
-
-Initialize host directories and the Docker network:
+To run Rust directly, start a local Redis and configure the example:
 
 ```sh
-./scripts/server.sh init
-```
-
-Start Redis and the app:
-
-```sh
-./scripts/server.sh start
-```
-
-Run the built-in smoke test:
-
-```sh
-./scripts/server.sh self-test
-```
-
-`self-test` checks Docker, Redis ping, app health, challenge creation, Redis key
-write, and challenge TTL. It deletes the test challenge key before exiting.
-
-## Operations
-
-Check status:
-
-```sh
-./scripts/server.sh status
-```
-
-Follow logs:
-
-```sh
-./scripts/server.sh logs
-./scripts/server.sh logs --redis
-```
-
-The app logs one safe line for each client-facing operation: challenge issue,
-attestation receipt/result, credential status lookup, and TAPCam capture
-signature verification. Large or sensitive payloads such as `attestationObject`,
-`assertionObject`, and raw challenges are not printed; logs include IDs, object
-lengths, hashes, and result reasons instead.
-
-Those request-level business logs are disabled by default. Start the app in
-request-log mode when you want to watch client traffic:
-
-```sh
-./scripts/server.sh start --request-logs --log-level info
-./scripts/server.sh logs
-```
-
-For quieter or noisier output, use:
-
-```sh
-./scripts/server.sh start --log-level warn
-./scripts/server.sh start --request-logs --log-level debug
-```
-
-Supported levels are `error`, `warn`, `info`, `debug`, and `trace`. App logs use
-a colored multi-line pretty format when `LOG_COLOR=always`.
-
-Stop the service:
-
-```sh
-./scripts/server.sh stop
-```
-
-`stop` backs up Redis by default, then stops Redis. To skip that backup:
-
-```sh
-./scripts/server.sh stop --no-backup
-```
-
-Create a Redis backup while Redis is running:
-
-```sh
-./scripts/server.sh backup
-```
-
-Start from an existing backup:
-
-```sh
-./scripts/server.sh start --restore-from /opt/tap-app-attest/backups/redis/redis-20260514-120000.rdb
-```
-
-This replaces the managed Redis data directory with the given RDB file, then
-starts Redis and the app.
-
-Clean containers and the Docker network, keeping Redis data and backups:
-
-```sh
-./scripts/server.sh clean
-```
-
-Start from an empty Redis state:
-
-```sh
-./scripts/server.sh clean --data
-./scripts/server.sh start
-```
-
-Remove containers, network, app image, Redis data, and Redis backups:
-
-```sh
-./scripts/server.sh clean --all
-```
-
-## Data Semantics
-
-Redis data lives on the host:
-
-```text
-/opt/tap-app-attest/data/redis
-```
-
-Redis backups live on the host:
-
-```text
-/opt/tap-app-attest/backups/redis
-```
-
-`stop` does not delete Redis data. A normal later `start` loads the same Redis
-data directory, so existing challenge and credential records are preserved.
-Only `clean --data` and `clean --all` delete Redis data.
-
-## Public HTTPS
-
-The script binds the app to the host loopback address:
-
-```text
-127.0.0.1:8080
-```
-
-Put Caddy, Nginx, or another HTTPS reverse proxy in front of it for your public
-domain. Do not expose Redis publicly.
-
-## Direct Local Run
-
-For local Rust development without Docker, start Redis yourself and override the
-Docker-facing `.env` values:
-
-```sh
+cp .env.example .env
+# Edit TEAM_ID and BUNDLE_ID to match your App.
 redis-server --appendonly yes
+```
 
+In another terminal:
+
+```sh
 set -a
 source .env
 set +a
-
-export SERVER_ADDR=127.0.0.1:8080
-export REDIS_URL=redis://127.0.0.1:6379
-export APPLE_APP_ATTEST_ROOT_CA_PATH=certs/apple_app_attestation_root_ca.pem
-
 cargo run
 ```
+
+Run backend checks with `cargo test`. Local `.env` is only for direct development;
+the installed host console reads `/etc/tapnap.conf`.
 
 ## Endpoints
 
@@ -229,12 +76,9 @@ POST /app-attest/credentials/status
 POST /tapcam/capture-signatures/verify
 ```
 
-`/app-attest/challenges` accepts both `attestation` and `assertion` purposes so
-the AppAttestKit challenge contract stays compatible. Capture signature
-verification does not use a long-term assertion challenge; it verifies the
-signature over the submitted `signingBinding` payload.
-
-Verify a TAPCam capture signature:
+`/app-attest/challenges` accepts `attestation` and `assertion` purposes for
+AppAttestKit compatibility. Capture verification signs the `signingBinding`
+payload directly and does not use a long-term assertion challenge.
 
 ```sh
 curl -sS -X POST http://127.0.0.1:8080/tapcam/capture-signatures/verify \
@@ -251,23 +95,11 @@ curl -sS -X POST http://127.0.0.1:8080/tapcam/capture-signatures/verify \
   }'
 ```
 
-Success returns:
+Success returns `status: "valid"`, `keyId` and `signingBindingSHA256`. Semantic
+verification failures return HTTP 200 with `status: "invalid"` and a reason.
+This proves that the registered key signed the binding; it does not upload or
+re-hash the original photo bytes.
 
-```json
-{
-  "status": "valid",
-  "keyId": "...",
-  "signingBindingSHA256": "..."
-}
-```
-
-Semantic verification failures return HTTP 200 with `status: "invalid"` and a
-reason. This endpoint proves that the registered App Attest key signed the
-`signingBinding`; it does not upload or re-hash the original photo bytes.
-
-## More Docs
-
-- `docs/REFERENCE_CONTRACTS.md`: upstream contracts this server follows
-- `docs/REDIS_SCHEMA.md`: Redis keys, fields, TTLs, and persistence behavior
-- `docs/ROADMAP.md`: shipped capture signature verification and planned TAP
-  Depth HEIC verification work
+- [Upstream contracts](docs/REFERENCE_CONTRACTS.md)
+- [Redis schema and persistence](docs/REDIS_SCHEMA.md)
+- [Backend roadmap](docs/ROADMAP.md)

@@ -1,390 +1,377 @@
-#!/usr/bin/env python3
-"""Pull a verified TAPCamVerifier build and publish it on this host (Python 3.9+)."""
+#!/usr/bin/env bash
+# Host console: Docker + Redis, Git-built website, Nginx and Certbot.
+set -Eeuo pipefail
+CONFIG=/etc/tapnap.conf
+APP=tap-app-attest-server
+REDIS=tap-app-attest-redis
+NETWORK=tap-app-attest-net
+DATA=/opt/tap-app-attest/data/redis
+BACKUPS=/opt/tap-app-attest/backups/redis
+WEB=/var/www/tapnap
+WEB_REPO=https://github.com/TAP-NAP/TAPCamVerifier.git
+WEB_BRANCH=ecs-web
+NGINX_CONF=/etc/nginx/conf.d/tapnap.conf
+ACME=/var/www/letsencrypt
+GREEN='' RED='' RESET=''
+if [[ -t 1 && -z ${NO_COLOR:-} ]]; then GREEN=$'\033[32m'; RED=$'\033[31m'; RESET=$'\033[0m'; fi
+info() { printf '%s%s%s\n' "$GREEN" "$*" "$RESET"; }
+die() { printf '%sERROR: %s%s\n' "$RED" "$*" "$RESET" >&2; exit 1; }
+trap 'printf "ERROR: line %s failed; see the command output above.\n" "$LINENO" >&2' ERR
+need() { local cmd; for cmd in "$@"; do command -v "$cmd" >/dev/null || die "Install $cmd first."; done; }
+rule() { printf '+----------------------+------------------------------------------------------------------+\n'; }
+row() {
+  local color=''
+  case "$2" in *unhealthy*|exited*|unavailable*) color=$RED ;; running*|active|PONG) color=$GREEN ;; esac
+  printf '| %-20.20s | %s%-64.64s%s |\n' "$1" "$color" "$2" "$RESET"
+}
+exists() { docker container inspect "$1" >/dev/null 2>&1; }
+redis() { docker exec "$REDIS" redis-cli -e --raw "$@"; }
+count_credentials() { redis --scan --pattern 'tap:credential:*' | LC_ALL=C sort -u | wc -l | tr -d ' '; }
 
-import argparse
-import contextlib
-import fcntl
-import hashlib
-import json
-import os
-from pathlib import Path, PurePosixPath
-import re
-import shutil
-import stat
-import sys
-import tempfile
-import urllib.error
-import urllib.parse
-import urllib.request
-import uuid
-import zipfile
+help() {
+  cat <<'EOF'
+Usage: sudo tap COMMAND
+  setup                Configure and start backend, website, Nginx and HTTPS
+  config               Edit commented settings; restart applies backend changes
+  start                Start Redis and backend with the current configuration
+  restart              Recreate backend with current configuration; keep Redis
+  stop                 Stop backend, back up Redis, then stop Redis; keep data
+  update [server|web]   Pull and deploy the backend image and/or built website
+  update web --check   Download and inspect website only; no root needed
+  rollback web         Switch to the previous local website
+  status               Show services, running settings, resources and data
+  logs [server|redis|nginx]  Follow service logs (default: server)
+  backup               Export Redis to an RDB file; print its path
+  certs                Count credentials and list the first 20 key IDs
+  certs show KEY_ID    Show one credential's metadata
+  help                 Show this help
+EOF
+}
 
-REPO = "TAP-NAP/TAPCamVerifier"
-WORKFLOW = ".github/workflows/deploy-pages.yml"
-API = "https://api.github.com"
-MAX_ZIP = 128 * 1024 * 1024
-MAX_FILES = 10000
-MAX_EXPANDED = 512 * 1024 * 1024
-RELEASE_NAME = r"[0-9a-f]{40}-[1-9][0-9]*-[1-9][0-9]*-[1-9][0-9]*"
-METADATA = ".tap-release.json"
+edit_config() {
+  if [[ ! -f $CONFIG ]]; then
+    (umask 077; cat > "$CONFIG" <<'EOF'
+# Host settings. This file is sourced by Bash; quote values containing spaces.
+# ACR backend image. Public images need no login. For a private image, first use
+# sudo docker login REGISTRY; Docker stores the credential on this host.
+APP_IMAGE=registry.cn-hangzhou.aliyuncs.com/tapnap/app-attest-server:v1
+# Redis image; the Docker daemon's configured mirror applies automatically.
+REDIS_IMAGE=redis:7-bookworm
+# Website domains. Point both DNS records to this ECS before running setup.
+# The apex redirects to DOMAIN. Change these with setup, not restart.
+DOMAIN=www.tapnap.net
+APEX=tapnap.net
+# Your email for the Let's Encrypt account; required by setup.
+EMAIL=
+# Host loopback port used by Nginx; apply changes with setup. Redis has no public port.
+APP_PORT=8080
 
+# Apple Developer team and App bundle ID; must match the signing App.
+TEAM_ID=UD3269PSCB
+BUNDLE_ID=TAP-NAP.TAPCamDemo
+# App Attest environment: production for release; development for Debug.
+# This is independent of the website's HTTPS certificate.
+APP_ATTEST_ENV=production
+# Challenge lifetime in seconds; positive integer, default one hour.
+CHALLENGE_TTL_SECONDS=3600
+# Include per-request business logs only when diagnosing client traffic.
+REQUEST_LOGS=false
+# Rust log filter; use warn or debug here when needed.
+RUST_LOG=tap_app_attest_server=info,tower_http=warn
+# Backend log colors: always, never, or auto.
+LOG_COLOR=always
+# Apple root CA is already inside the image; no host file or mount is needed.
+EOF
+    )
+  fi
+  "${EDITOR:-vi}" "$CONFIG"
+}
+load_config() {
+  [[ -f $CONFIG ]] || die "Run sudo tap config first."
+  # Only the administrator edits this root-owned configuration.
+  source "$CONFIG"
+  REQUEST_LOGS=${REQUEST_LOGS:-false}
+  RUST_LOG=${RUST_LOG:-tap_app_attest_server=info,tower_http=warn}
+  LOG_COLOR=${LOG_COLOR:-always}
+  [[ $REQUEST_LOGS == true || $REQUEST_LOGS == false ]] || die 'REQUEST_LOGS must be true or false.'
+  [[ ${APP_ATTEST_ENV:-} == production || ${APP_ATTEST_ENV:-} == development ]] || die 'APP_ATTEST_ENV must be production or development.'
+  [[ ${APP_PORT:-} =~ ^[0-9]+$ && ${#APP_PORT} -le 5 ]] && ((10#$APP_PORT > 0 && 10#$APP_PORT <= 65535)) || die 'Invalid APP_PORT.'
+  [[ ${CHALLENGE_TTL_SECONDS:-} =~ ^[1-9][0-9]*$ ]] || die 'Invalid CHALLENGE_TTL_SECONDS.'
+  [[ -n ${TEAM_ID:-} && -n ${BUNDLE_ID:-} && -n ${APP_IMAGE:-} && -n ${REDIS_IMAGE:-} ]] || die 'Complete Apple identifiers and image names in tap config.'
+}
 
-class Failure(Exception):
-    pass
+start_redis() {
+  docker network inspect "$NETWORK" >/dev/null 2>&1 || docker network create "$NETWORK" >/dev/null
+  if exists "$REDIS"; then
+    [[ $(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}' "$REDIS") == "$DATA" ]] || die "Redis uses another data directory; inspect it before proceeding."
+    docker start "$REDIS" >/dev/null
+  else
+    mkdir -p "$DATA"
+    docker run -d --name "$REDIS" --restart unless-stopped --network "$NETWORK" \
+      --log-opt max-size=10m --log-opt max-file=3 -v "$DATA:/data" \
+      "$REDIS_IMAGE" redis-server --appendonly yes >/dev/null
+  fi
+  local i
+  for i in {1..30}; do
+    if [[ $(redis PING 2>/dev/null) == PONG ]]; then return; fi
+    sleep 1
+  done
+  die 'Redis is not ready; use tap logs redis.'
+}
+app_ready() {
+  local i
+  for i in {1..30}; do
+    if docker exec "$APP" curl -fsS --max-time 2 http://127.0.0.1:8080/healthz >/dev/null 2>&1; then return; fi
+    sleep 1
+  done
+  return 1
+}
+start_server() {
+  docker image inspect "$APP_IMAGE" >/dev/null 2>&1 || docker pull "$APP_IMAGE"
+  start_redis
+  # Keep the old container until the replacement passes its health check.
+  exists "$APP-previous" && die "Interrupted update: inspect $APP-previous before retrying."
+  if exists "$APP"; then docker stop "$APP" >/dev/null; docker rename "$APP" "$APP-previous"; fi
+  if docker run -d --name "$APP" --restart unless-stopped --network "$NETWORK" \
+    --log-opt max-size=10m --log-opt max-file=3 -p "127.0.0.1:$APP_PORT:8080" \
+    -e SERVER_ADDR=0.0.0.0:8080 -e "REDIS_URL=redis://$REDIS:6379" \
+    -e "TEAM_ID=$TEAM_ID" -e "BUNDLE_ID=$BUNDLE_ID" -e "APP_ATTEST_ENV=$APP_ATTEST_ENV" \
+    -e "CHALLENGE_TTL_SECONDS=$CHALLENGE_TTL_SECONDS" -e "REQUEST_LOGS=$REQUEST_LOGS" \
+    -e "RUST_LOG=$RUST_LOG" -e "LOG_COLOR=$LOG_COLOR" "$APP_IMAGE" >/dev/null && app_ready; then
+    if exists "$APP-previous"; then docker rm "$APP-previous" >/dev/null; fi
+    info 'Backend ready.'
+  else
+    docker logs --tail 30 "$APP" >&2 || true
+    if exists "$APP"; then docker rm -f "$APP" >/dev/null; fi
+    if exists "$APP-previous"; then docker rename "$APP-previous" "$APP"; docker start "$APP" >/dev/null; fi
+    die 'New backend failed; previous container restored when available.'
+  fi
+}
+backup() (
+  umask 077
+  mkdir -p "$BACKUPS"
+  local file
+  file=$(mktemp "$BACKUPS/redis-$(date +%Y%m%d-%H%M%S)-XXXXXX.rdb")
+  trap 'rm -f "$file"' EXIT
+  [[ $(redis SAVE) == OK ]] || die 'Redis snapshot failed.'
+  docker cp "$REDIS:/data/dump.rdb" "$file" >/dev/null
+  chmod 600 "$file"
+  [[ -s $file ]] || die 'Empty backup.'
+  trap - EXIT
+  info "Backup: $file"
+  printf 'Download from your computer: scp root@ECS_IP:%s .\n' "$file"
+)
 
+update_web() (
+  need git tar
+  local stage source commit old file target check=${1:-}
+if [[ $check == --check ]]; then stage=$(mktemp -d);
+  else
+    for target in "$WEB" "$WEB/releases" "$WEB/shared" "$WEB/shared/assets"; do
+      [[ ! -L $target ]] || die "Deployment directory is a symlink: $target"
+      install -d -m 755 "$target"
+    done
+    stage=$(mktemp -d "$WEB/.download-XXXXXX")
+  fi
+  trap 'rm -rf "$stage"' EXIT
+  # Git is only transport here; ECS never executes or builds the downloaded site.
+  GIT_TERMINAL_PROMPT=0 git clone -q --depth 1 --single-branch --branch "$WEB_BRANCH" "$WEB_REPO" "$stage/repo"
+  commit=$(git -C "$stage/repo" rev-parse HEAD)
+  mkdir "$stage/site"
+  git -C "$stage/repo" archive HEAD | tar -xf - -C "$stage/site"
+  [[ -z $(find "$stage/site" ! -type d ! -type f -print -quit) ]] || die 'Website contains a link or special file.'
+  for file in index.html verify/index.html privacy/index.html .tap-source; do
+    [[ -s $stage/site/$file ]] || die "Website is missing $file."
+  done
+  source=$(cat "$stage/site/.tap-source")
+  [[ $source =~ ^[0-9a-f]{40}$ ]] || die 'Invalid website source revision.'
+  compgen -G "$stage/site/assets/tapcam_verifier_wasm-*.wasm" >/dev/null || die 'Versioned WASM is missing.'
+  info "Website source: $source"
+  info "Download size: $(du -sh "$stage/site" | cut -f1) (expanded)"
+  if [[ $check == --check ]]; then info 'Download OK; nothing deployed.'; return; fi
+  # Retain immutable assets for browsers with an older page still open.
+  while IFS= read -r -d '' file; do
+    target="$WEB/shared/assets/${file#"$stage/site/assets/"}"
+    install -d -m 755 "$(dirname "$target")"
+    if [[ -e $target ]]; then cmp -s "$file" "$target" || die "Asset changed without a new filename: $target";
+    else install -m 644 "$file" "$stage/asset"; mv "$stage/asset" "$target"; fi
+  done < <(find "$stage/site/assets" -type f -print0)
+  if [[ ! -d $WEB/releases/$commit ]]; then
+    chmod -R a+rX "$stage/site"
+    mv "$stage/site" "$WEB/releases/$commit"
+  fi
+  old=$(readlink "$WEB/current" || true)
+  [[ ! -e $WEB/current || -L $WEB/current ]] || die "$WEB/current must be a symlink."
+  if [[ $old != "releases/$commit" ]]; then
+    if [[ -n $old ]]; then ln -sfn "$old" "$WEB/.previous"; mv -Tf "$WEB/.previous" "$WEB/previous"; fi
+    ln -sfn "releases/$commit" "$WEB/.current"
+    mv -Tf "$WEB/.current" "$WEB/current"
+  fi
+  info "Website published: $source"
+)
 
-def say(message):
-    color = sys.stdout.isatty() and "NO_COLOR" not in os.environ
-    print(("\033[36m[tap]\033[0m " if color else "[tap] ") + message, flush=True)
+nginx_config() {
+  local tls='' listen='listen 80;' scheme=http cert=/etc/letsencrypt/live/$DOMAIN
+  if [[ -s $cert/fullchain.pem && -s $cert/privkey.pem ]]; then
+    listen='listen 443 ssl;'; scheme=https
+    tls="ssl_certificate $cert/fullchain.pem; ssl_certificate_key $cert/privkey.pem; ssl_protocols TLSv1.2 TLSv1.3;"
+  fi
+  cat <<EOF
+# Managed by tap setup.
+server {
+    $listen
+    $tls
+    server_name $DOMAIN;
+    root $WEB/current;
+    index index.html;
+    client_max_body_size 2m;
+    gzip on;
+    gzip_vary on;
+    gzip_types text/css application/javascript application/json application/wasm image/svg+xml;
+    location ^~ /.well-known/acme-challenge/ { root $ACME; }
+    location ~ /\\. { return 404; }
+    location / { try_files \$uri \$uri/ =404; add_header Cache-Control "no-cache" always; }
+    location ^~ /assets/ {
+        alias $WEB/shared/assets/;
+        add_header Cache-Control "public, max-age=31536000, immutable";
+    }
+    location ~ ^/(app-attest/|tapcam/capture-signatures/verify\$|healthz\$) {
+        proxy_pass http://127.0.0.1:$APP_PORT;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_cache off;
+        add_header Cache-Control "no-store" always;
+    }
+}
+server {
+    $listen
+    $tls
+    server_name $APEX;
+    location ^~ /.well-known/acme-challenge/ { root $ACME; }
+    location / { return 301 $scheme://$DOMAIN\$request_uri; }
+}
+EOF
+  if [[ $scheme == https ]]; then
+    cat <<EOF
+server {
+    listen 80;
+    server_name $DOMAIN $APEX;
+    location ^~ /.well-known/acme-challenge/ { root $ACME; }
+    location / { return 301 https://$DOMAIN\$request_uri; }
+}
+EOF
+  fi
+}
+write_nginx() {
+  local old
+  old=$(mktemp)
+  if [[ -f $NGINX_CONF ]]; then cp "$NGINX_CONF" "$old"; fi
+  nginx_config > "$NGINX_CONF"
+  if ! nginx -t; then
+    if [[ -s $old ]]; then cp "$old" "$NGINX_CONF"; else rm -f "$NGINX_CONF"; fi
+    rm -f "$old"
+    die 'Nginx check failed; previous file restored.'
+  fi
+  rm -f "$old"
+  systemctl enable --now nginx
+  systemctl reload nginx
+}
+setup() {
+  need nginx certbot systemctl git tar curl
+  [[ -n ${EMAIL:-} && $EMAIL == *@* ]] || die 'Set EMAIL using tap config.'
+  local domain timer renewal=''
+  for domain in "$DOMAIN" "$APEX"; do
+    [[ $domain =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ && $domain == *.* ]] || die "Invalid domain: $domain"
+  done
+  [[ $DOMAIN != "$APEX" ]] || die 'DOMAIN and APEX must differ.'
+  for timer in certbot.timer certbot-renew.timer snap.certbot.renew.timer; do
+    if systemctl cat "$timer" >/dev/null 2>&1; then renewal=$timer; break; fi
+  done
+  [[ -n $renewal ]] || die 'Install Certbot with its distribution-provided renewal timer first.'
+  docker pull "$APP_IMAGE"
+  start_server
+  update_web
+  install -d -m 755 "$ACME" /etc/nginx/conf.d
+  write_nginx
+  certbot certonly --webroot -w "$ACME" --cert-name "$DOMAIN" -d "$DOMAIN" -d "$APEX" \
+    --email "$EMAIL" --agree-tos --non-interactive --keep-until-expiring \
+    --deploy-hook 'nginx -t && systemctl reload nginx'
+  write_nginx
+  systemctl enable --now "$renewal"
+  info "Ready: https://$DOMAIN (renewal: $renewal)"
+}
 
+status() {
+  docker info >/dev/null 2>&1 || die 'Docker is unavailable; check the daemon and your access permissions.'
+  local name state settings
+  rule; row TAPNap "$(date '+%F %T %Z')"; rule
+  for name in "$APP" "$REDIS"; do
+    state=$(docker inspect -f '{{.State.Status}}{{if .State.Health}} / {{.State.Health.Status}}{{end}}' "$name" 2>/dev/null || printf 'not installed')
+    row "${name#tap-app-attest-}" "$state"
+  done
+  row Nginx "$(systemctl is-active nginx 2>/dev/null || true)"
+  row Website "$(cat "$WEB/current/.tap-source" 2>/dev/null || printf 'not installed')"
+  row Redis "$(redis PING 2>/dev/null || printf 'unavailable')"
+  if [[ $(redis PING 2>/dev/null) == PONG ]]; then
+    row Credentials "$(count_credentials)"
+    row 'Total Redis keys' "$(redis DBSIZE)"
+    row 'Redis memory' "$(redis INFO memory | sed -n 's/^used_memory_human://p' | tr -d '\r')"
+  fi
+  rule
+  settings=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$APP" 2>/dev/null || true)
+  for name in APP_ATTEST_ENV TEAM_ID BUNDLE_ID REQUEST_LOGS; do row "$name" "$(printf '%s\n' "$settings" | sed -n "s/^$name=//p")"; done
+  row 'Running image' "$(docker inspect -f '{{.Image}}' "$APP" 2>/dev/null || printf 'none')"
+  row Config "$CONFIG"; rule
+  docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}' "$APP" "$REDIS" 2>/dev/null || true
+  df -h /; free -h
+  systemctl list-timers --all --no-pager '*certbot*'
+}
+certs() {
+  if [[ $# == 0 ]]; then
+    rule; row Credentials "$(count_credentials) registered records"; rule
+    redis --scan --pattern 'tap:credential:*' | LC_ALL=C sort -u | sed -n '1,20s/^tap:credential://p'
+    info 'First 20 key IDs; use tap certs show KEY_ID for details.'
+  else
+    [[ $# == 2 && $1 == show && $2 =~ ^[A-Za-z0-9_-]+$ ]] || die 'Usage: tap certs show KEY_ID'
+    local details
+    details=$(redis EVAL 'local raw=redis.call("GET",KEYS[1]); if not raw then return redis.error_reply("Credential not found") end; local c=cjson.decode(raw); local rows={}; for _,k in ipairs({"keyId","status","environment","teamId","bundleId","createdAt","updatedAt"}) do table.insert(rows,k); table.insert(rows,tostring(c[k] or "")) end; return rows' 1 "tap:credential:$2") || exit 1
+    rule
+    while IFS= read -r key && IFS= read -r value; do row "$key" "$value"; done <<< "$details"$'\n'
+    rule
+  fi
+}
 
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-def request(url, token=""):
-    parsed = urllib.parse.urlsplit(url)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-        raise Failure("Download redirect must use HTTPS without embedded credentials.")
-    headers = {"User-Agent": "tapnap-host-deploy"}
-    if token:
-        if parsed.netloc != "api.github.com":
-            raise Failure("Refusing to send GitHub credentials to another host.")
-        headers.update({"Authorization": "Bearer " + token,
-                        "Accept": "application/vnd.github+json",
-                        "X-GitHub-Api-Version": "2022-11-28"})
-    return urllib.request.build_opener(NoRedirect()).open(
-        urllib.request.Request(url, headers=headers), timeout=30)
-
-
-def api(path, token):
-    with request(API + "/repos/" + REPO + path, token) as response:
-        data = response.read(4 * 1024 * 1024 + 1)
-    if len(data) > 4 * 1024 * 1024:
-        raise Failure("GitHub API response is too large.")
-    return json.loads(data)
-
-
-def check_run(run):
-    if (run.get("status") not in ("in_progress", "completed")
-            or run.get("conclusion") not in (None, "success", "failure", "timed_out")
-            or run.get("head_branch") != "main"
-            or run.get("event") not in ("push", "workflow_dispatch")
-            or run.get("path", "").split("@", 1)[0] != WORKFLOW
-            or run.get("repository", {}).get("full_name") != REPO
-            or run.get("head_repository", {}).get("full_name") != REPO
-            or not re.fullmatch(r"[0-9a-f]{40}", run.get("head_sha", ""))
-            or not isinstance(run.get("id"), int) or run["id"] <= 0
-            or not isinstance(run.get("run_attempt"), int) or run["run_attempt"] <= 0):
-        raise Failure("Run must be a non-cancelled main-branch push/manual run of " + WORKFLOW)
-
-
-def check_build(run, token):
-    check_run(run)
-    jobs = api("/actions/runs/{id}/attempts/{run_attempt}/jobs?per_page=100".format(**run), token)
-    builds = [job for job in jobs.get("jobs", []) if job.get("name") == "build"]
-    if len(builds) != 1:
-        raise Failure("Expected one build job in this workflow attempt.")
-    job = builds[0]
-    if (job.get("status") != "completed" or job.get("conclusion") != "success"
-            or job.get("run_id") != run["id"] or job.get("run_attempt") != run["run_attempt"]
-            or job.get("head_sha") != run["head_sha"]):
-        raise Failure("This attempt's build job has not completed successfully.")
-    for name in ("Test Rust and TypeScript", "Build static site", "Upload site for manual server deployment"):
-        steps = [step for step in job.get("steps", []) if step.get("name") == name]
-        if len(steps) != 1 or steps[0].get("status") != "completed" or steps[0].get("conclusion") != "success":
-            raise Failure("Required build step did not succeed: " + name)
-
-
-def select_build(run_id, token):
-    if run_id:
-        run = api("/actions/runs/" + str(run_id), token)
-        check_build(run, token)
-    else:
-        runs = api("/actions/workflows/deploy-pages.yml/runs?branch=main&per_page=20", token)
-        for run in runs.get("workflow_runs", []):
-            try:
-                check_build(run, token)
-                break
-            except Failure:
-                continue
-        else:
-            raise Failure("No eligible build in the latest 20 main runs. Run the updated workflow or specify --run.")
-    name = "tapnap-web-" + run["head_sha"] + "-" + str(run["run_attempt"])
-    found = api("/actions/runs/" + str(run["id"]) + "/artifacts?per_page=100&name=" + name, token)
-    artifacts = [item for item in found.get("artifacts", []) if item.get("name") == name]
-    if len(artifacts) != 1:
-        raise Failure("Expected one " + name + " artifact. Run the updated workflow first.")
-    artifact = artifacts[0]
-    origin = artifact.get("workflow_run", {})
-    repository_id = run["repository"].get("id")
-    if (artifact.get("expired") is not False
-            or not re.fullmatch(r"sha256:[0-9a-f]{64}", artifact.get("digest") or "")
-            or not isinstance(artifact.get("id"), int) or artifact["id"] <= 0
-            or not isinstance(artifact.get("size_in_bytes"), int)
-            or not 0 < artifact["size_in_bytes"] <= MAX_ZIP
-            or not repository_id
-            or origin.get("id") != run["id"] or origin.get("head_sha") != run["head_sha"]
-            or origin.get("head_branch") != "main"
-            or origin.get("repository_id") != repository_id
-            or origin.get("head_repository_id") != repository_id):
-        raise Failure("Artifact is expired, oversized, lacks a SHA-256 digest, or has the wrong origin.")
-    return {"commit": run["head_sha"], "run_id": run["id"], "attempt": run["run_attempt"],
-            "artifact_id": artifact["id"], "digest": artifact["digest"]}
-
-
-def download(build, target, token):
-    url = API + "/repos/" + REPO + "/actions/artifacts/" + str(build["artifact_id"]) + "/zip"
-    # GitHub authenticates the API request, then redirects to a short-lived storage URL.
-    # Never forward the token to storage, including on subsequent redirects.
-    for hop in range(6):
-        try:
-            response = request(url, token if hop == 0 else "")
-            break
-        except urllib.error.HTTPError as error:
-            if error.code not in (301, 302, 303, 307, 308) or not error.headers.get("Location"):
-                raise
-            url = urllib.parse.urljoin(url, error.headers["Location"])
-            error.close()
-    else:
-        raise Failure("Too many artifact download redirects.")
-    digest = hashlib.sha256()
-    count = 0
-    with response, target.open("xb") as output:
-        while True:
-            chunk = response.read(1024 * 1024)
-            if not chunk:
-                break
-            count += len(chunk)
-            if count > MAX_ZIP:
-                raise Failure("Artifact download exceeded 128 MiB.")
-            output.write(chunk)
-            digest.update(chunk)
-    if "sha256:" + digest.hexdigest() != build["digest"]:
-        raise Failure("Artifact SHA-256 does not match GitHub metadata.")
-    say("Downloaded and verified " + str(count) + " bytes.")
-
-
-def unpack(archive, destination):
-    destination.mkdir()
-    with zipfile.ZipFile(archive) as bundle:
-        entries = bundle.infolist()
-        if len(entries) > MAX_FILES or sum(item.file_size for item in entries) > MAX_EXPANDED:
-            raise Failure("Artifact exceeds the extraction size/file limit.")
-        seen = set()
-        total = 0
-        for item in entries:
-            name = item.filename.rstrip("/")
-            path = PurePosixPath(name)
-            kind = stat.S_IFMT(item.external_attr >> 16)
-            if (not name or name != str(path) or path.is_absolute()
-                    or any(part in (".", "..") for part in path.parts)
-                    or any(part.startswith(".") for part in path.parts) and name != ".nojekyll"
-                    or "\\" in name or any(ord(char) < 32 for char in name)
-                    or name in seen or kind not in (0, stat.S_IFREG, stat.S_IFDIR)
-                    or kind == stat.S_IFDIR and not item.is_dir()
-                    or item.flag_bits & 1
-                    or item.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)):
-                raise Failure("Artifact contains an unsafe or duplicate entry.")
-            seen.add(name)
-            target = destination.joinpath(*path.parts)
-            if item.is_dir():
-                target.mkdir(parents=True, exist_ok=True)
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with bundle.open(item) as source, target.open("xb") as output:
-                while True:
-                    chunk = source.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    total += len(chunk)
-                    if total > MAX_EXPANDED:
-                        raise Failure("Expanded artifact exceeded 512 MiB.")
-                    output.write(chunk)
-            target.chmod(0o644)
-    for directory in [destination, *(item for item in destination.rglob("*") if item.is_dir())]:
-        directory.chmod(0o755)
-    for page in ("index.html", "verify/index.html", "privacy/index.html"):
-        if not (destination / page).is_file() or (destination / page).stat().st_size == 0:
-            raise Failure("Artifact is missing " + page)
-    if not any((destination / "assets").glob("tapcam_verifier_wasm-*.wasm")):
-        raise Failure("Artifact must contain the versioned verifier WASM. Run the updated build.")
-
-
-def file_digest(path):
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.digest()
-
-
-def current_target(root, link="current"):
-    path = root / link
-    if not path.is_symlink():
-        if path.exists():
-            raise Failure(str(path) + " must be a managed symlink; existing files were left intact.")
-        return None
-    target = os.readlink(path)
-    if (not re.fullmatch("releases/" + RELEASE_NAME, target)
-            or (root / "releases").is_symlink() or (root / target).is_symlink()
-            or not (root / target).is_dir()):
-        raise Failure("Invalid or missing " + link + " release.")
-    return target
-
-
-def replace_link(root, name, target):
-    temporary = root / ("." + name + "-" + uuid.uuid4().hex)
-    try:
-        temporary.symlink_to(target)
-        os.replace(temporary, root / name)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-@contextlib.contextmanager
-def locked(root):
-    new_root = not root.exists()
-    root.mkdir(parents=True, exist_ok=True)
-    if new_root:
-        root.chmod(0o755)
-    with (root / ".deploy.lock").open("a") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise Failure("Another update or rollback is running.") from None
-        yield
-
-
-def publish(root, site, build):
-    old = current_target(root)
-    previous = current_target(root, "previous")
-    name = "{commit}-{run_id}-{attempt}-{artifact_id}".format(**build)
-    target = "releases/" + name
-    release = root / target
-    for directory in (root / "releases", root / "shared", root / "shared/assets"):
-        if directory.is_symlink():
-            raise Failure("Deployment directories must not be symlinks.")
-        directory.mkdir(exist_ok=True)
-        directory.chmod(0o755)
-    if release.is_symlink():
-        raise Failure("Release directories must not be symlinks.")
-    if release.exists():
-        if json.loads((release / METADATA).read_text()) != build:
-            raise Failure("Existing release metadata does not match the downloaded artifact.")
-    else:
-        (site / METADATA).write_text(json.dumps(build, indent=2) + "\n")
-        # Keep old hashed URLs reachable for open tabs and rollback. Hard links avoid
-        # duplicate asset storage; a collision must never overwrite a live resource.
-        for source in sorted((site / "assets").rglob("*")):
-            if not source.is_file():
-                continue
-            destination = root / "shared/assets" / source.relative_to(site / "assets")
-            parent = root / "shared/assets"
-            for part in source.relative_to(site / "assets").parts[:-1]:
-                parent /= part
-                if parent.is_symlink():
-                    raise Failure("Asset directories must not be symlinks.")
-                parent.mkdir(exist_ok=True)
-                parent.chmod(0o755)
-            if destination.exists() or destination.is_symlink():
-                if destination.is_symlink() or not destination.is_file() or file_digest(destination) != file_digest(source):
-                    raise Failure("An existing asset has different bytes: " + destination.name)
-                source.unlink()
-                os.link(destination, source)
-            else:
-                os.link(source, destination)
-        os.rename(site, release)
-    if old == target:
-        return
-    if old:
-        replace_link(root, "previous", old)
-    # Final commit point: all validation, resource writes and metadata precede this.
-    try:
-        replace_link(root, "current", target)
-    except OSError:
-        if previous:
-            replace_link(root, "previous", previous)
-        elif old:
-            (root / "previous").unlink()
-        raise
-
-
-def update(root, run_id, token, dry_run):
-    build = select_build(run_id, token)
-    say("Candidate: " + build["commit"] + " | run " + str(build["run_id"]) + " | attempt " + str(build["attempt"]))
-    with contextlib.nullcontext() if dry_run else locked(root):
-        with tempfile.TemporaryDirectory(prefix=".tap-download-", dir=None if dry_run else root) as staging:
-            staging = Path(staging)
-            download(build, staging / "artifact.zip", token)
-            unpack(staging / "artifact.zip", staging / "site")
-            run = api("/actions/runs/" + str(build["run_id"]), token)
-            check_build(run, token)
-            if run["head_sha"] != build["commit"] or run["run_attempt"] != build["attempt"]:
-                raise Failure("The workflow was rerun during download; retry the update.")
-            if dry_run:
-                say("Check passed. Download and extraction work; no website was changed.")
-            else:
-                publish(root, staging / "site", build)
-                say("Published " + build["commit"] + ". Nginx must use the supplied web locations.")
-
-
-def rollback(root):
-    with locked(root):
-        old = current_target(root)
-        previous = current_target(root, "previous")
-        if not old or not previous:
-            raise Failure("Both current and previous releases are required for rollback.")
-        replace_link(root, "current", previous)
-        say("Rolled back to " + previous.removeprefix("releases/"))
-
-
-def status(root):
-    for link in ("current", "previous"):
-        target = current_target(root, link)
-        if target:
-            build = json.loads((root / target / METADATA).read_text())
-            say(link + ": " + build["commit"] + " | run " + str(build["run_id"]) + " | artifact " + str(build["artifact_id"]))
-        else:
-            say(link + ": not installed")
-    say("Web root: " + str(root))
-    if root.exists():
-        say("Free disk: {:.1f} GiB".format(shutil.disk_usage(root).free / 1024 ** 3))
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("update", "status", "rollback"))
-    parser.add_argument("service", choices=("web",))
-    parser.add_argument("--root", type=Path, default=Path("/var/www/tapnap"), help="website storage directory")
-    parser.add_argument("--run", type=int, help="GitHub run ID with successful build; default: latest eligible main build")
-    parser.add_argument("--dry-run", action="store_true", help="download and verify without changing the website")
-    args = parser.parse_args()
-    if (args.run is not None and args.run <= 0) or (args.command != "update" and (args.run or args.dry_run)):
-        parser.error("--run and --dry-run apply only to update; run IDs must be positive")
-    root = args.root.expanduser().resolve()
-    try:
-        if args.command == "update":
-            token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
-            if not token:
-                raise Failure("Set GH_TOKEN to a GitHub token with Actions: read for " + REPO + ".")
-            update(root, args.run, token, args.dry_run)
-        elif args.command == "rollback":
-            rollback(root)
-        else:
-            status(root)
-    except urllib.error.HTTPError as error:
-        say("FAILED: GitHub/download HTTP " + str(error.code) + ". Check token permissions, artifact expiry and network access.")
-        return 1
-    except urllib.error.URLError:
-        say("FAILED: HTTPS connection failed. Check ECS access to GitHub API and artifact storage.")
-        return 1
-    except (Failure, OSError, ValueError, KeyError, zipfile.BadZipFile) as error:
-        say("FAILED: " + str(error))
-        return 1
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+command=${1:-help}; shift || true
+case "$command $*" in
+  'help '|'-h '|'--help ') help; exit ;;
+  'update web --check') update_web --check; exit ;;
+esac
+[[ $(uname -s) == Linux ]] || die 'This console runs on the Linux host; help and update web --check also work locally.'
+[[ $EUID == 0 ]] || die 'Run with sudo.'
+need docker flock
+# One manual deployment at a time; status/logs remain available during updates.
+case "$command" in
+  setup|config|start|restart|stop|update|rollback|backup) exec 9>/run/tapnap.lock; flock -n 9 || die 'Another tap operation is running.' ;;
+esac
+case "$command $*" in
+  'config ') edit_config; load_config ;;
+  'setup ') [[ -f $CONFIG ]] || edit_config; load_config; setup ;;
+  'start '|'restart ') load_config; start_server ;;
+  'stop ')
+    if exists "$APP"; then docker stop "$APP" >/dev/null; fi
+    if [[ $(docker inspect -f '{{.State.Running}}' "$REDIS" 2>/dev/null) == true ]]; then backup; fi
+    if exists "$REDIS"; then docker stop "$REDIS" >/dev/null; fi ;;
+  'update '|'update server') load_config; docker pull "$APP_IMAGE"; start_server; [[ $# == 1 ]] || update_web ;;
+  'update web') update_web ;;
+  'rollback web')
+    [[ -L $WEB/previous && -d $WEB/previous ]] || die 'No previous website.'
+    ln -sfn "$(readlink "$WEB/previous")" "$WEB/.current"; mv -Tf "$WEB/.current" "$WEB/current"; info 'Previous website restored.' ;;
+  'status ') status ;;
+  'backup ') backup ;;
+  'logs '|'logs server') docker logs --tail 100 -f "$APP" ;;
+  'logs redis') docker logs --tail 100 -f "$REDIS" ;;
+  'logs nginx') tail -n 100 -F /var/log/nginx/access.log /var/log/nginx/error.log ;;
+  *) if [[ $command == certs ]]; then certs "$@"; else help; die 'Unknown command or arguments.'; fi ;;
+esac
