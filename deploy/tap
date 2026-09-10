@@ -104,6 +104,7 @@ start_redis() {
   docker network inspect "$NETWORK" >/dev/null 2>&1 || docker network create "$NETWORK" >/dev/null
   if exists "$REDIS"; then
     [[ $(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}' "$REDIS") == "$DATA" ]] || die "Redis uses another data directory; inspect it before proceeding."
+    docker update --restart unless-stopped "$REDIS" >/dev/null
     docker start "$REDIS" >/dev/null
   else
     mkdir -p "$DATA"
@@ -127,7 +128,11 @@ app_ready() {
   return 1
 }
 start_server() {
-  docker image inspect "$APP_IMAGE" >/dev/null 2>&1 || docker pull "$APP_IMAGE"
+  need systemctl
+  systemctl enable --now docker
+  if [[ ${1:-} == --pull ]] || ! docker image inspect "$APP_IMAGE" >/dev/null 2>&1; then
+    docker pull "$APP_IMAGE"
+  fi
   start_redis
   # Keep the old container until the replacement passes its health check.
   exists "$APP-previous" && die "Interrupted update: inspect $APP-previous before retrying."
@@ -290,8 +295,7 @@ setup() {
     if systemctl cat "$timer" >/dev/null 2>&1; then renewal=$timer; break; fi
   done
   [[ -n $renewal ]] || die 'Install Certbot with its distribution-provided renewal timer first.'
-  docker pull "$APP_IMAGE"
-  start_server
+  start_server --pull
   update_web
   install -d -m 755 "$ACME" /etc/nginx/conf.d
   write_nginx
@@ -310,8 +314,11 @@ status() {
   for name in "$APP" "$REDIS"; do
     state=$(docker inspect -f '{{.State.Status}}{{if .State.Health}} / {{.State.Health.Status}}{{end}}' "$name" 2>/dev/null || printf 'not installed')
     row "${name#tap-app-attest-}" "$state"
+    row "${name#tap-app-attest-} restart" "$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$name" 2>/dev/null || printf 'not installed')"
   done
   row Nginx "$(systemctl is-active nginx 2>/dev/null || true)"
+  row 'Docker on boot' "$(systemctl is-enabled docker 2>/dev/null || true)"
+  row 'Nginx on boot' "$(systemctl is-enabled nginx 2>/dev/null || true)"
   row Website "$(cat "$WEB/current/.tap-source" 2>/dev/null || printf 'not installed')"
   row Redis "$(redis PING 2>/dev/null || printf 'unavailable')"
   if [[ $(redis PING 2>/dev/null) == PONG ]]; then
@@ -363,7 +370,7 @@ case "$command $*" in
     if exists "$APP"; then docker stop "$APP" >/dev/null; fi
     if [[ $(docker inspect -f '{{.State.Running}}' "$REDIS" 2>/dev/null) == true ]]; then backup; fi
     if exists "$REDIS"; then docker stop "$REDIS" >/dev/null; fi ;;
-  'update '|'update server') load_config; docker pull "$APP_IMAGE"; start_server; [[ $# == 1 ]] || update_web ;;
+  'update '|'update server') load_config; start_server --pull; [[ $# == 1 ]] || update_web ;;
   'update web') update_web ;;
   'rollback web')
     [[ -L $WEB/previous && -d $WEB/previous ]] || die 'No previous website.'

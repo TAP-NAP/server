@@ -88,6 +88,15 @@ its health check, the script restores the old container when available.
 Backend updates retain Redis. Changing `REDIS_IMAGE` does not replace an
 existing Redis container.
 
+`setup`, `start`, `restart` and backend updates enable and start the Docker
+system service before using it. `setup` also enables Nginx and the Certbot
+renewal timer. Docker starts the backend and Redis after a host reboot using
+`unless-stopped`; reused Redis containers receive this policy too. Boot uses
+the installed images and website, without downloading or running `tap setup`.
+An explicit `tap stop` keeps the containers stopped across reboots until
+`tap start`. `tap status` shows the Docker/Nginx boot settings and container
+restart policies.
+
 Website downloads are validated before publication, including required HTML,
 source revision and versioned WASM. Publication switches one symlink. Failed
 downloads retain the current site, and old hashed assets remain available for
