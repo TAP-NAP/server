@@ -67,7 +67,8 @@ def api(path, token):
 
 
 def check_run(run):
-    if (run.get("status") != "completed" or run.get("conclusion") != "success"
+    if (run.get("status") not in ("in_progress", "completed")
+            or run.get("conclusion") not in (None, "success", "failure", "timed_out")
             or run.get("head_branch") != "main"
             or run.get("event") not in ("push", "workflow_dispatch")
             or run.get("path", "").split("@", 1)[0] != WORKFLOW
@@ -76,18 +77,40 @@ def check_run(run):
             or not re.fullmatch(r"[0-9a-f]{40}", run.get("head_sha", ""))
             or not isinstance(run.get("id"), int) or run["id"] <= 0
             or not isinstance(run.get("run_attempt"), int) or run["run_attempt"] <= 0):
-        raise Failure("Run must be a successful main-branch push/manual run of " + WORKFLOW)
+        raise Failure("Run must be a non-cancelled main-branch push/manual run of " + WORKFLOW)
+
+
+def check_build(run, token):
+    check_run(run)
+    jobs = api("/actions/runs/{id}/attempts/{run_attempt}/jobs?per_page=100".format(**run), token)
+    builds = [job for job in jobs.get("jobs", []) if job.get("name") == "build"]
+    if len(builds) != 1:
+        raise Failure("Expected one build job in this workflow attempt.")
+    job = builds[0]
+    if (job.get("status") != "completed" or job.get("conclusion") != "success"
+            or job.get("run_id") != run["id"] or job.get("run_attempt") != run["run_attempt"]
+            or job.get("head_sha") != run["head_sha"]):
+        raise Failure("This attempt's build job has not completed successfully.")
+    for name in ("Test Rust and TypeScript", "Build static site", "Upload site for manual server deployment"):
+        steps = [step for step in job.get("steps", []) if step.get("name") == name]
+        if len(steps) != 1 or steps[0].get("status") != "completed" or steps[0].get("conclusion") != "success":
+            raise Failure("Required build step did not succeed: " + name)
 
 
 def select_build(run_id, token):
     if run_id:
         run = api("/actions/runs/" + str(run_id), token)
+        check_build(run, token)
     else:
-        runs = api("/actions/workflows/deploy-pages.yml/runs?branch=main&status=success&per_page=1", token)
-        if not runs.get("workflow_runs"):
-            raise Failure("No successful main-branch workflow run found.")
-        run = runs["workflow_runs"][0]
-    check_run(run)
+        runs = api("/actions/workflows/deploy-pages.yml/runs?branch=main&per_page=20", token)
+        for run in runs.get("workflow_runs", []):
+            try:
+                check_build(run, token)
+                break
+            except Failure:
+                continue
+        else:
+            raise Failure("No eligible build in the latest 20 main runs. Run the updated workflow or specify --run.")
     name = "tapnap-web-" + run["head_sha"] + "-" + str(run["run_attempt"])
     found = api("/actions/runs/" + str(run["id"]) + "/artifacts?per_page=100&name=" + name, token)
     artifacts = [item for item in found.get("artifacts", []) if item.get("name") == name]
@@ -297,7 +320,7 @@ def update(root, run_id, token, dry_run):
             download(build, staging / "artifact.zip", token)
             unpack(staging / "artifact.zip", staging / "site")
             run = api("/actions/runs/" + str(build["run_id"]), token)
-            check_run(run)
+            check_build(run, token)
             if run["head_sha"] != build["commit"] or run["run_attempt"] != build["attempt"]:
                 raise Failure("The workflow was rerun during download; retry the update.")
             if dry_run:
@@ -335,7 +358,7 @@ def main():
     parser.add_argument("command", choices=("update", "status", "rollback"))
     parser.add_argument("service", choices=("web",))
     parser.add_argument("--root", type=Path, default=Path("/var/www/tapnap"), help="website storage directory")
-    parser.add_argument("--run", type=int, help="successful GitHub run ID; default: latest successful main run")
+    parser.add_argument("--run", type=int, help="GitHub run ID with successful build; default: latest eligible main build")
     parser.add_argument("--dry-run", action="store_true", help="download and verify without changing the website")
     args = parser.parse_args()
     if (args.run is not None and args.run <= 0) or (args.command != "update" and (args.run or args.dry_run)):

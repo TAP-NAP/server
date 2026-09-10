@@ -28,6 +28,14 @@ def run_record(sha="a" * 40, attempt=1, run_id=101):
             "head_repository": {"full_name": tap.REPO, "id": 5}}
 
 
+def jobs_record(run):
+    return {"jobs": [{"name": "build", "status": "completed", "conclusion": "success",
+                      "run_id": run["id"], "run_attempt": run["run_attempt"], "head_sha": run["head_sha"],
+                      "steps": [{"name": name, "status": "completed", "conclusion": "success"}
+                                for name in ("Test Rust and TypeScript", "Build static site",
+                                             "Upload site for manual server deployment")]}]}
+
+
 def site_zip(extra=(), omit=()):
     entries = [("index.html", b"home"), ("verify/index.html", b"verify"),
                ("privacy/index.html", b"privacy"),
@@ -75,35 +83,86 @@ class DeployTests(unittest.TestCase):
             tap.publish(self.root, stage, build)
         return os.readlink(self.root / "current")
 
-    def mock_update(self, data, *, dry=False, run=None, failure=None):
+    def mock_update(self, data, *, dry=False, run=None, failure=None, jobs=None):
+        run = run or run_record("b" * 40)
         def fetch(build, target, token):
             if failure:
                 raise failure
             target.write_bytes(data)
         with mock.patch.object(tap, "select_build", return_value=build_record(data, "b" * 40, 11)), \
                 mock.patch.object(tap, "download", side_effect=fetch), \
-                mock.patch.object(tap, "api", return_value=run or run_record("b" * 40)):
+                mock.patch.object(tap, "api", side_effect=[run, jobs if jobs is not None else jobs_record(run)]):
             tap.update(self.root, 101, "secret", dry)
 
     def test_trusted_selection_and_latest_selection(self):
         run = run_record()
         artifact = artifact_record(site_zip(), run)
         for run_id, first in [(101, run), (None, {"workflow_runs": [run]})]:
-            with self.subTest(run_id=run_id), mock.patch.object(tap, "api", side_effect=[first, {"artifacts": [artifact]}]):
+            with self.subTest(run_id=run_id), mock.patch.object(tap, "api", side_effect=[first, jobs_record(run), {"artifacts": [artifact]}]):
                 selected = tap.select_build(run_id, "secret")
                 self.assertEqual((selected["commit"], selected["attempt"], selected["artifact_id"]), ("a" * 40, 1, 10))
 
     def test_untrusted_runs_are_rejected(self):
-        changes = [("status", "in_progress"), ("conclusion", "failure"), ("head_branch", "feature"),
+        changes = [("status", "queued"), ("head_branch", "feature"),
                    ("event", "pull_request"), ("path", ".github/workflows/other.yml"),
                    ("repository", {"full_name": "other/repo", "id": 5}),
                    ("head_repository", {"full_name": "fork/TAPCamVerifier", "id": 6}),
                    ("head_sha", "short"), ("run_attempt", 0), ("run_attempt", "1"), ("id", -1)]
+        changes += [("conclusion", value) for value in ("cancelled", "skipped", "action_required", "stale")]
         for field, value in changes:
             run = run_record()
             run[field] = value
             with self.subTest(field=field, value=value), self.assertRaises(tap.Failure):
                 tap.check_run(run)
+
+    def test_successful_build_can_publish_while_pages_pending_or_failed(self):
+        for status, conclusion in [("in_progress", None), ("completed", "failure"), ("completed", "timed_out")]:
+            run = run_record(attempt=2)
+            run.update(status=status, conclusion=conclusion)
+            artifact = artifact_record(site_zip(), run)
+            with self.subTest(status=status, conclusion=conclusion), mock.patch.object(
+                    tap, "api", side_effect=[run, jobs_record(run), {"artifacts": [artifact]}]) as api:
+                self.assertEqual(tap.select_build(101, "secret")["attempt"], 2)
+                self.assertEqual(api.call_args_list[1], mock.call(
+                    "/actions/runs/101/attempts/2/jobs?per_page=100", "secret"))
+
+    def test_failed_skipped_missing_or_wrong_origin_build_is_rejected(self):
+        run = run_record()
+        good = jobs_record(run)
+        variants = [{"jobs": []}, {"jobs": good["jobs"] * 2}]
+        for field, value in [("name", "other"), ("status", "in_progress"), ("conclusion", "failure"),
+                             ("conclusion", "skipped"), ("run_id", 102), ("run_attempt", 2),
+                             ("head_sha", "b" * 40), ("steps", [])]:
+            jobs = copy.deepcopy(good)
+            jobs["jobs"][0][field] = value
+            variants.append(jobs)
+        for index in range(3):
+            for field, value in [("status", "in_progress"), ("conclusion", "failure"), ("conclusion", "skipped")]:
+                jobs = copy.deepcopy(good)
+                jobs["jobs"][0]["steps"][index][field] = value
+                variants.append(jobs)
+            jobs = copy.deepcopy(good)
+            jobs["jobs"][0]["steps"].append(copy.deepcopy(jobs["jobs"][0]["steps"][index]))
+            variants.append(jobs)
+        for jobs in variants:
+            with self.subTest(jobs=jobs), mock.patch.object(tap, "api", return_value=jobs), self.assertRaises(tap.Failure):
+                tap.check_build(run, "secret")
+
+    def test_latest_selection_falls_back_after_bad_build_but_not_network_failure(self):
+        recent = run_record("b" * 40, run_id=102)
+        older = run_record()
+        bad = jobs_record(recent)
+        bad["jobs"][0]["conclusion"] = "failure"
+        listing = {"workflow_runs": [recent, older]}
+        with mock.patch.object(tap, "api", side_effect=[listing, bad, jobs_record(older),
+                                                       {"artifacts": [artifact_record(site_zip(), older)]}]) as api:
+            self.assertEqual(tap.select_build(None, "secret")["run_id"], 101)
+            self.assertNotIn("status=", api.call_args_list[0].args[0])
+            self.assertIn("per_page=20", api.call_args_list[0].args[0])
+        with mock.patch.object(tap, "api", side_effect=[listing, urllib.error.URLError("offline")]) as api:
+            with self.assertRaises(urllib.error.URLError):
+                tap.select_build(None, "secret")
+            self.assertEqual(api.call_count, 2)
 
     def test_bad_artifact_identity_or_digest_is_rejected(self):
         run = run_record()
@@ -121,10 +180,10 @@ class DeployTests(unittest.TestCase):
             item["workflow_run"][field] = value
             variants.append(item)
         for item in variants:
-            with self.subTest(artifact=item), mock.patch.object(tap, "api", side_effect=[run, {"artifacts": [item]}]):
+            with self.subTest(artifact=item), mock.patch.object(tap, "api", side_effect=[run, jobs_record(run), {"artifacts": [item]}]):
                 with self.assertRaises(tap.Failure):
                     tap.select_build(101, "secret")
-        with mock.patch.object(tap, "api", side_effect=[run, {"artifacts": [good, good]}]):
+        with mock.patch.object(tap, "api", side_effect=[run, jobs_record(run), {"artifacts": [good, good]}]):
             with self.assertRaises(tap.Failure):
                 tap.select_build(101, "secret")
 
@@ -214,6 +273,8 @@ class DeployTests(unittest.TestCase):
         for run in [run_record("b" * 40, attempt=2), run_record("c" * 40)]:
             with self.subTest(run=run), self.assertRaises(tap.Failure):
                 self.mock_update(site_zip(), run=run)
+        with self.assertRaises(tap.Failure):
+            self.mock_update(site_zip(), jobs={"jobs": []})
         self.assertEqual(os.readlink(self.root / "current"), old)
         self.assertEqual(len(list((self.root / "releases").iterdir())), 1)
         self.assertFalse(list(self.root.glob(".tap-download-*")))

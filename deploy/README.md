@@ -1,6 +1,6 @@
 # Pull and publish the TAPNap website
 
-`tap` runs on the ECS host. It downloads a successful GitHub Actions build of
+`tap` runs on the ECS host. It downloads a verified GitHub Actions build of
 TAPCamVerifier and switches the static website served by Nginx. ECS does not
 compile the frontend, and GitHub does not receive an ECS SSH key.
 
@@ -48,13 +48,15 @@ the existing symlink. Website releases do not modify the installed tool.
 ## Produce the first artifact
 
 Push the frontend workflow changes to `TAP-NAP/TAPCamVerifier` and wait for
-**Deploy GitHub Pages** to finish successfully on `main`. It must include
-the artifact upload step; older workflow runs cannot be deployed with this tool.
+the **build** job in **Deploy GitHub Pages** to finish successfully on `main`.
+It must include the artifact upload step; older workflow runs cannot be deployed with this tool.
 The website's Rust and JavaScript tests and production build run in GitHub.
 
 The artifact is named `tapnap-web-COMMIT_SHA-RUN_ATTEMPT` and retained by GitHub
-for 30 days. The existing overseas Pages deployment continues. A failure of
-the workflow, including its Pages job, makes that run ineligible for ECS.
+for 30 days. The existing overseas Pages deployment continues independently. ECS requires
+the same attempt's `build` job and its test, build and deployment-artifact upload
+steps to succeed. A waiting or failed downstream Pages deployment does not block
+ECS; a failed, skipped or incomplete build does. Cancelled workflows are rejected.
 
 Create a GitHub fine-grained token limited to `TAP-NAP/TAPCamVerifier`, with
 **Actions: Read-only** (and the automatically included metadata access).
@@ -73,7 +75,7 @@ It never prints credentials or the temporary signed artifact download URL.
 
 ## Test downloads before publishing
 
-The default selects the latest successful `main` build and prints its commit.
+The default selects the latest eligible `main` build and prints its commit.
 You do not need to look up or enter a run ID:
 
 ```sh
@@ -98,9 +100,12 @@ tap update web
 tap status web
 ```
 
-The run must be completed and successful, from this repository's `main` branch,
-triggered by a push or manual dispatch of `deploy-pages.yml`. Its commit,
-attempt and artifact origin are checked together; a concurrent rerun is rejected.
+The run must come from this repository's `main` branch, triggered by a push or
+manual dispatch of `deploy-pages.yml`. Its exact attempt must have one successful
+`build` job with successful `Test Rust and TypeScript`, `Build static site`, and
+`Upload site for manual server deployment` steps. The job, artifact and commit
+are checked together; a concurrent rerun is rejected. The tool rechecks the build
+before publishing, without waiting for the downstream Pages job.
 
 Copy the contents of `/opt/tapnap/nginx-web.conf` into your existing `www.tapnap.net`
 `server` block, replacing its old static `location /` definition. Keep the
@@ -127,9 +132,9 @@ For later releases, either select an explicit successful run again or use:
 tap update web
 ```
 
-Without `--run`, the tool selects the **latest successful main workflow run**,
+Without `--run`, the tool selects the **latest eligible build among the latest 20 main workflow runs**,
 prints its exact commit and run ID, then downloads it. This may be older than
-the latest source commit if a newer run is still building or has failed. Use
+the latest source commit if a newer build is still running or has failed. Use
 `--dry-run` to inspect the selection without publishing. Each invocation selects
 independently. To pin the same build across checking and publishing, pass the
 printed run number as `--run RUN_ID`; this is optional. Tests are not rerun on ECS.
