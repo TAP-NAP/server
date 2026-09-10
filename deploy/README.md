@@ -1,29 +1,31 @@
 # TAPNap host console
 
-Install one Bash script on the Linux host. `tap` calls Docker, Git, Nginx,
-Certbot and systemd directly. The console itself is pure Shell; Certbot has its
-own packaged dependencies, including Python.
+## Purpose
+
+The `tap` Bash script operates the TAP App Attest backend, Redis, and the
+TAPCamVerifier website on a Linux host. It calls Docker, Git, Nginx, Certbot
+and systemd directly and can be installed without a source checkout.
 
 ```text
-server main → ACR overseas automatic build → backend image
-Verifier main → GitHub tests/build → ecs-web static branch
-ECS: tap update → pull image + static files → Docker backend + host Nginx
+backend image + TAPCamVerifier ecs-web static branch
+  -> manual tap update on the host
+  -> Docker backend + persistent Redis + host Nginx
 ```
 
-Production deployment stays manual. GitHub never connects to ECS by SSH.
-Redis runs in Docker with its existing host data directory. The Apple App
-Attest root CA is inside the backend image; Rust reads and validates it.
-Let's Encrypt certificates belong to host Nginx and are independent of it.
+Backend images are built before deployment, using the configured registry's
+build pipeline. The website is built by TAPCamVerifier's GitHub workflow.
+The console pulls both artifacts; it performs no builds and requires no
+GitHub-to-host SSH access.
 
-## Install and set up
+## Usage and build
 
-The host needs Bash, Docker, Git, curl, tar, Nginx, Certbot and its packaged
-systemd renewal timer. `flock`, `free` and the other commands are ordinary Linux
-utilities. Use the distribution's packages; configure Docker's mirror in the
-Docker daemon if needed. For private ACR images, run `sudo docker login REGISTRY`
-once. The default backend image is the public Hangzhou ACR `v1` image.
+Install Bash, Docker, Git, curl, tar, Nginx, Certbot and its packaged systemd
+renewal timer using the host distribution's packages. `flock`, `free` and the
+other commands are ordinary Linux utilities. Configure any Docker mirror in
+the Docker daemon. Private registry images require `sudo docker login REGISTRY`;
+the script defaults to the public Hangzhou ACR `v1` image.
 
-After these changes are published, download just the script on ECS:
+Install the console:
 
 ```sh
 curl -fL https://raw.githubusercontent.com/TAP-NAP/server/main/deploy/tap -o /tmp/tap
@@ -32,28 +34,26 @@ sudo tap config
 sudo tap setup
 ```
 
-`config` opens `/etc/tapnap.conf` in `${EDITOR:-vi}`. Every setting has a comment;
-check the Apple identifiers and fill in the Let's Encrypt account email. Use
-`production` for the release App; the current Debug App uses `development`.
-After changing backend settings, run `tap restart`. Changing domain or host
-port requires `tap setup` to also regenerate Nginx configuration.
+`config` opens `/etc/tapnap.conf` in `${EDITOR:-vi}`. Check the Apple team and
+bundle identifiers, set `APP_ATTEST_ENV` to match the signing app, and provide
+the Let's Encrypt account email. Backend changes take effect with
+`tap restart`; domain and host-port changes need `tap setup` to regenerate
+Nginx configuration. The Apple App Attest environment is independent of the
+website's HTTPS certificate.
 
-Before `setup`, point `www.tapnap.net` and `tapnap.net` to ECS and allow incoming
-80/443. The frontend's `publish-ecs` job must have created `ecs-web` first.
-`setup` pulls the backend, starts Redis and Rust, downloads the website, writes
-`/etc/nginx/conf.d/tapnap.conf`, obtains HTTPS certificates using Certbot's
-webroot mode, and enables the installed Certbot renewal timer. It can be rerun;
-it keeps Redis data and reuses unexpired certificates. On a host with an
-existing site, remove conflicting server blocks for these two domains first.
+Before `setup`, point the configured domains (default `www.tapnap.net` and
+`tapnap.net`) to the host and allow incoming ports 80/443. The frontend's
+`publish-ecs` workflow must have created `ecs-web`. Remove conflicting Nginx
+server blocks for the configured domains.
 
-The script checks Nginx configuration before reloading it. Certbot stores the
-renewal parameters and reloads Nginx after a successful renewal. There is no
-custom certificate scheduler or certificate command to maintain. See
-[Certbot renewal documentation](https://eff-certbot.readthedocs.io/en/stable/using.html#renewing-certificates).
+`setup` pulls the backend image, starts Redis and Rust, downloads the website,
+writes Nginx configuration, obtains HTTPS certificates with Certbot webroot,
+and enables the installed renewal timer. Rerunning it retains Redis data and
+reuses unexpired certificates. Nginx configuration is checked before reload;
+Certbot checks and reloads Nginx after a successful renewal.
 
-## Daily commands
-
-Use `sudo` for host operations; `help` and the download-only check also work locally.
+Use `sudo` for host operations. `help` and the download-only check also work
+locally without root.
 
 | Command | Operation |
 | --- | --- |
@@ -66,42 +66,75 @@ Use `sudo` for host operations; `help` and the download-only check also work loc
 | `tap update web` | Download the generated static branch and publish it |
 | `tap update web --check` | Download and inspect only; no host configuration or TLS |
 | `tap rollback web` | Restore the previous local website; repeated calls stay there |
-| `tap status` | Tables of running services/settings, credentials and resource usage |
+| `tap status` | Show running services/settings, credential counts and resource usage |
 | `tap logs [server\|redis\|nginx]` | Follow logs; default is Rust |
 | `tap backup` | Save a Redis RDB and print its path and download command |
 | `tap certs` | Count App Attest credential records; show the first 20 key IDs |
 | `tap certs show KEY_ID` | Show one record's metadata without the large attestation payload |
 
-`restart` uses the locally available image; `update server` pulls ACR first.
-If a replacement backend fails its health check, the script restores the old
-container when available. Redis image updates are separate from backend updates;
-changing `REDIS_IMAGE` does not replace an existing Redis container.
+For request diagnostics, edit `REQUEST_LOGS` and `RUST_LOG` with `tap config`,
+then use `tap restart` and `tap logs`. Per-request business logs default to off.
 
-Website download failures leave the current site in place. Publication switches
-one symlink after validating the HTML pages and versioned WASM. Old hashed assets
-remain available for open browser tabs. Releases and shared assets are retained;
-`tap status` includes disk usage so you can remove unneeded old files manually.
-Credential counts use Redis SCAN and may change while registrations are arriving.
+To replace an existing console, install the script at the path used by the
+current command, including `/opt/tapnap/tap` if the command is a symlink to it.
+Copy any existing Apple settings into `tap config`, then run `tap restart`.
+There is no automatic configuration import.
 
-## Files and network
+## Principles
 
-- `/etc/tapnap.conf`: administrator-owned settings; no ACR/GitHub tokens.
-- `/opt/tap-app-attest/data/redis`: Redis AOF/RDB persistence; reused from the old script.
-- `/opt/tap-app-attest/backups/redis`: private RDB backups; download them off the host.
-- `/var/www/tapnap`: static releases, `current`/`previous` symlinks and shared assets.
-- `/etc/nginx/conf.d/tapnap.conf`: generated static site, API proxy and redirects.
-- `/etc/letsencrypt`: Certbot-owned HTTPS certificates and renewal settings.
+Deployment remains manual. `restart` uses a local image if available, pulling
+only if absent; `update server` pulls first. If a replacement backend fails
+its health check, the script restores the old container when available.
+Backend updates retain Redis. Changing `REDIS_IMAGE` does not replace an
+existing Redis container.
+
+Website downloads are validated before publication, including required HTML,
+source revision and versioned WASM. Publication switches one symlink. Failed
+downloads retain the current site, and old hashed assets remain available for
+open browser tabs. Releases and shared assets remain on disk until the host
+administrator removes unneeded files.
+
+Redis uses AOF persistence. `tap backup` exports an RDB snapshot while Redis
+runs; copy backups off the host. `tap stop` backs up running Redis before
+stopping it. The console has no restore or data-deletion command. To restore
+an RDB, stop both containers and follow Redis's restore procedure using an
+empty data directory; existing AOF files take precedence over the RDB. The
+[Redis schema](../docs/REDIS_SCHEMA.md) describes the stored security state.
+
+The Apple App Attest root CA is bundled in the backend image and read by Rust.
+Host Nginx owns the independent Let's Encrypt certificates, with renewal
+managed by Certbot's installed timer.
+
+## Directory map
+
+The source console is [`deploy/tap`](tap). Its host paths are:
+
+| Host path | Role |
+| --- | --- |
+| `/etc/tapnap.conf` | Administrator-owned settings; no ACR/GitHub tokens |
+| `/opt/tap-app-attest/data/redis` | Persistent Redis AOF/RDB data |
+| `/opt/tap-app-attest/backups/redis` | Private RDB backups |
+| `/var/www/tapnap` | Static releases, `current`/`previous` symlinks and shared assets |
+| `/etc/nginx/conf.d/tapnap.conf` | Generated website, API proxy and redirects |
+| `/etc/letsencrypt` | Certbot-owned HTTPS certificates and renewal settings |
 
 Nginx proxies `/healthz`, `/app-attest/` and
-`/tapcam/capture-signatures/verify` to `127.0.0.1:8080` by default. Redis has no
-public port. HTML revalidates, hashed assets cache for a year, and API responses
-use `no-store`. CDN setup remains in the cloud console; bypass caching for API
-routes and forward ACME HTTP challenges to the origin.
+`/tapcam/capture-signatures/verify` to host loopback port 8080 by default.
+Redis has no public port. HTML revalidates, hashed assets cache for a year,
+and API responses use `no-store`. Configure any CDN in the cloud console:
+bypass API caching and forward ACME HTTP challenges to the origin.
 
-For an existing installation, install the new `tap` at the path used by your
-current command (including `/opt/tapnap/tap` if it is a symlink), copy the Apple
-settings from the old `.env` into `tap config`, and run `tap restart`. The old
-`scripts/server.sh` and Python frontend tool are removed. There is no automatic
-configuration import, data deletion or restore command. To restore an RDB, stop
-both containers and restore into an empty Redis data directory using the Redis
-procedure; an old AOF must not override the restored RDB.
+## Repository dependencies
+
+- [server](https://github.com/TAP-NAP/server) supplies this console and the
+  backend Dockerfile. `APP_IMAGE` selects the prebuilt image to deploy.
+- [TAPCamVerifier](https://github.com/TAP-NAP/TAPCamVerifier) supplies the
+  generated `ecs-web` static branch. Git is the artifact transport; the host
+  does not build or execute repository build scripts.
+- [TAPArtifactContracts](https://github.com/TAP-NAP/TAPArtifactContracts) is the
+  normative source for product, artifact and backend requirements. It has no
+  runtime or deployment dependency.
+
+See the [service README](../README.md) for Rust and client-repository
+dependencies, and [Certbot's renewal documentation](https://eff-certbot.readthedocs.io/en/stable/using.html#renewing-certificates)
+for certificate operations.

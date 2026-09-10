@@ -45,7 +45,7 @@ Fields:
   "purpose": "attestation",
   "credentialName": "photo_keyid",
   "associatedKeyId": null,
-  "associatedCaptureID": null,
+  "associatedCaptureId": null,
   "status": "issued",
   "createdAt": "2026-05-12T00:00:00Z",
   "expiresAt": "2026-05-12T01:00:00Z",
@@ -108,6 +108,10 @@ object and is also the Redis key suffix. We intentionally do not store duplicate
 `credentialId` or public-key-SHA256 identifier fields; the public verification
 material is kept as `publicKeyX962Base64Url` and
 `credentialPublicKeyCoseBase64Url`.
+
+`lastCounter` is initialized to `null` and is not updated by the offline
+capture-signature endpoint. That endpoint uses unchecked counter ordering;
+this field does not provide replay protection.
 
 ## Deployment State Semantics
 
