@@ -14,6 +14,13 @@ manage the app and Redis through `scripts/server.sh`. This repository no longer
 uses Docker Compose, so Redis persistence, backup, restore, and cleanup all have
 one set of semantics.
 
+## Website deployment
+
+The host-side [website deployment tool](deploy/README.md) pulls verified
+TAPCamVerifier build artifacts from GitHub and publishes them through host Nginx.
+Install `deploy/tap` once; no frontend checkout or build toolchain is needed on
+ECS. Its website commands are independent of the backend/Redis operations below.
+
 ## Configuration
 
 Create `.env` from the example:
