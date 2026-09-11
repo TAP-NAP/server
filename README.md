@@ -1,5 +1,7 @@
 # TAP App Attest Server
 
+English | [简体中文](README.zh-CN.md)
+
 ## Purpose
 
 Rust service for TAPCam App Attest credential registration and capture-signature
@@ -14,7 +16,7 @@ repository documents the service implementation and operation; begin with the
 and the shared
 [backend App Attest gate](https://github.com/TAP-NAP/TAPArtifactContracts/blob/main/bindings/capture-binding-and-proof-v1.md#backend-app-attest-gate).
 
-## Usage and build
+## Usage
 
 For direct development, install Rust and Redis, then configure the example:
 
@@ -30,41 +32,32 @@ In another terminal at the repository root:
 set -a
 source .env
 set +a
-cargo run
+cargo run --locked
 ```
 
-The example binds to `127.0.0.1:8080`. Run unit tests with `cargo test`, or build
-the container with `docker build -t tap-app-attest-server:latest .`.
+The program reads process environment variables; it does not load `.env`
+automatically. The example binds to `127.0.0.1:8080`. Test or build the image:
+
+```sh
+cargo test --locked
+docker build -t tap-app-attest-server:latest .
+```
 
 For a Linux host, use the [deployment console](deploy/README.md). It pulls a
 prebuilt backend image and website; deployment is a manual host operation.
 The host configuration is `/etc/tapnap.conf`, separate from local `.env`.
 
-| Endpoint | Current behavior |
-| --- | --- |
-| `GET /healthz` | Check service and Redis availability |
-| `POST /app-attest/challenges` | Issue a challenge for `attestation` or `assertion` |
-| `POST /app-attest/attestations` | Verify and register an App Attest credential |
-| `POST /app-attest/credentials/status` | Return the JSON string `"accepted"`, `"revoked"`, or `"unknown"` |
-| `POST /tapcam/capture-signatures/verify` | Verify a registered key's capture signature |
+`GET /healthz` checks service and Redis availability. The implemented App Attest
+routes are in [src/routes.rs](src/routes.rs); request fields and response meaning
+are defined in the backend contract above. The capture-verification endpoint's
+cross-origin policy permits `https://verifier.tapnap.net`.
 
-The capture endpoint accepts `keyId`, `assertionObject`, and the four-field
-`signingBinding` defined by the
-[binding contract](https://github.com/TAP-NAP/TAPArtifactContracts/blob/main/bindings/capture-binding-and-proof-v1.md#signingbinding-and-app-attest-input).
-Success returns `status: "valid"`, canonical `keyId`, and
-`signingBindingSHA256`. Semantic verification failures return HTTP 200 with
-`status: "invalid"` and a reason; malformed input and service errors use error
-HTTP statuses. Browser cross-origin access to this endpoint permits
-`https://verifier.tapnap.net`.
-
-## Principles
+## How it works
 
 Registration follows `challenge -> Apple attestation verification -> Redis
-credential`. Challenges contain 32 random bytes, expire after one hour by
-default, and are consumed atomically. Registration verifies the App ID,
-environment, and key identity using `SHA256(rawChallenge)` as client data hash.
-The Apple root CA is read from the configured local file; the Docker image
-includes its own copy under `/app/certs/`.
+credential`. The service checks the configured app identity and environment,
+consumes challenges atomically, and uses a local Apple root CA. The Docker image
+includes that certificate under `/app/certs/`.
 
 Capture verification follows `signingBinding -> canonical JSON -> registered
 public key + App Attest assertion -> valid/invalid`. The caller first verifies
@@ -85,7 +78,7 @@ Redis stores credentials without a TTL. See the
 Per-request business logs default to off; set `REQUEST_LOGS` and `RUST_LOG` only
 as needed. Logs omit raw challenges and attestation/assertion payloads.
 
-## Directory map
+## Directory structure
 
 | Path | Role |
 | --- | --- |
@@ -104,13 +97,12 @@ Unit tests live beside the Rust implementation in `src/`.
 
 | Repository | Relationship |
 | --- | --- |
-| [TAPArtifactContracts](https://github.com/TAP-NAP/TAPArtifactContracts) | Normative product, artifact and HTTP contracts; documentation dependency |
-| [attestation_assertion_verifier](https://github.com/TAP-NAP/attestation_assertion_verifier) | Rust Git dependency providing `apple_app_attest_attestation`, the reusable App Attest cryptographic verifier |
-| [AppAttestKit](https://github.com/TAP-NAP/AppAttestKit) | Swift HTTP client whose registration/status models this API supports; not a Rust build dependency |
-| [TAPCamDemo](https://github.com/TAP-NAP/TAPCamDemo) | Native producer and registration client through AppAttestKit |
-| [TAPCamVerifier](https://github.com/TAP-NAP/TAPCamVerifier) | Browser capture-verification client; its generated `ecs-web` branch also supplies the static website deployed by `tap` |
+| [TAPArtifactContracts](https://github.com/TAP-NAP/TAPArtifactContracts) | Normative product, artifact and HTTP requirements; documentation dependency, not executable code. |
+| [attestation_assertion_verifier](https://github.com/TAP-NAP/attestation_assertion_verifier) | Rust Git dependency providing `apple_app_attest_attestation`. `Cargo.lock` fixes the resolved revision. |
+| [TAPCamDemo](https://github.com/TAP-NAP/TAPCamDemo) | Native producer whose camera app calls the registration and credential-status HTTP endpoints. |
+| [TAPCamVerifier](https://github.com/TAP-NAP/TAPCamVerifier) | Browser client of capture verification. Its generated `ecs-web` branch also supplies the static website deployed by `tap`. |
 
-Other Rust dependencies are declared in `Cargo.toml`; Redis is a runtime
-service. Host Docker, Nginx and Certbot requirements are in the deployment
-instructions. The static website is a deployment input, not a source of
-normative contract definitions.
+The two clients are not Rust build dependencies. Other Rust packages are
+listed in `Cargo.toml`; Redis is a required runtime service. Linux host tools
+are listed in the [deployment guide](deploy/README.md). The website is a
+deployment input and does not define this service's protocol.
